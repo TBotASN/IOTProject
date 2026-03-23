@@ -207,21 +207,27 @@ def test_pir():
         GPIO.setwarnings(False)
         GPIO.setup(PIN_PIR, GPIO.IN)
 
-        count = [0]
+        count = 0
+        deadline = time.time() + 15
+        last_state = None
 
-        def _cb(channel):
-            count[0] += 1
-            print(f"  [OK]  Motion detected! (event #{count[0]})")
+        while time.time() < deadline:
+            state = GPIO.input(PIN_PIR)
+            if state != last_state:
+                if state == GPIO.HIGH:
+                    count += 1
+                    print(f"  [OK]  Motion detected! (event #{count})")
+                else:
+                    print(f"  [--]  No motion")
+                last_state = state
+            time.sleep(0.5)
 
-        GPIO.add_event_detect(PIN_PIR, GPIO.RISING, callback=_cb, bouncetime=500)
-        time.sleep(15)
-        GPIO.remove_event_detect(PIN_PIR)
         GPIO.cleanup([PIN_PIR])
 
-        if count[0] == 0:
+        if count == 0:
             warn("No motion detected. Check wiring or sensor sensitivity adjustment.")
         else:
-            ok(f"Total events detected: {count[0]}")
+            ok(f"Total events detected: {count}")
     except ImportError:
         err("RPi.GPIO not installed. Run: pip install RPi.GPIO")
     except Exception as exc:
