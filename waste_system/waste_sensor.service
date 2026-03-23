@@ -1,0 +1,22 @@
+# waste_sensor.service — systemd unit for the sensor node
+# Install:
+#   sudo cp waste_sensor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now waste_sensor
+
+[Unit]
+Description=Smart Waste Management Sensor Node
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/waste_system
+ExecStart=/usr/bin/python3 /home/pi/waste_system/sensor_node.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

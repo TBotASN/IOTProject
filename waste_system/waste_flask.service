@@ -1,0 +1,22 @@
+# waste_flask.service — systemd unit for the Flask dashboard
+# Install:
+#   sudo cp waste_flask.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now waste_flask
+
+[Unit]
+Description=Smart Waste Management Flask Dashboard
+After=network.target waste_sensor.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/waste_system
+ExecStart=/usr/bin/python3 /home/pi/waste_system/app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
