@@ -10,7 +10,7 @@ Hardware (BCM pin numbering):
   PIR        GPIO17 (Pin 11)
   IR prox    GPIO27 (Pin 13)
   DHT22      GPIO4  (Pin 7)
-  SenseHAT   Full 40-pin GPIO header (I2C on GPIO2/3, SPI on GPIO8-11)
+  SenseHAT   Jumper cables — see pin table below (I2C, SPI, power, EEPROM)
   LCD 16×2   I2C SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), PCF8574 at 0x27
   Camera     CSI ribbon connector (not GPIO)
 """
@@ -52,11 +52,16 @@ PIN_TABLE = """
 ╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
 ║ DHT22            ║  GPIO4     ║  Pin 7        ║ 1-wire data (adafruit-circuitpython) ║
 ╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ SenseHAT — I2C   ║  GPIO2/3   ║  Pin 3/5      ║ SDA/SCL — pressure & humidity ICs   ║
-║ SenseHAT — SPI   ║  GPIO8-11  ║  Pin 24,19,   ║ CE0,MOSI,MISO,SCLK — LED matrix     ║
-║                  ║            ║  21,23        ║ framebuffer                          ║
-║ SenseHAT — EEPROM║  GPIO0/1   ║  Pin 27/28    ║ ID EEPROM (HAT spec)                 ║
-║ SenseHAT — IMU   ║  (I2C)     ║  Pin 3/5      ║ LSM9DS1 accel/gyro/mag via I2C       ║
+║ SenseHAT — 3.3V  ║  —         ║  Pin 1        ║ 3.3V power to SenseHAT               ║
+║ SenseHAT — 5V    ║  —         ║  Pin 2        ║ 5V power to SenseHAT                 ║
+║ SenseHAT — GND   ║  —         ║  Pin 6        ║ Ground                               ║
+║ SenseHAT — I2C   ║  GPIO2/3   ║  Pin 3/5      ║ SDA/SCL — all sensors + ATtiny LED   ║
+║ SenseHAT — MOSI  ║  GPIO10    ║  Pin 19       ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — MISO  ║  GPIO9     ║  Pin 21       ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — SCLK  ║  GPIO11    ║  Pin 23       ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — CE0   ║  GPIO8     ║  Pin 24       ║ SPI Chip Enable 0                    ║
+║ SenseHAT — CE1   ║  GPIO7     ║  Pin 26       ║ SPI Chip Enable 1                    ║
+║ SenseHAT — EEPROM║  GPIO0/1   ║  Pin 27/28    ║ HAT ID EEPROM (ID_SD / ID_SC)        ║
 ╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
 ║ LCD 16×2 (I2C)   ║  GPIO2/3   ║  Pin 3/5      ║ PCF8574 I2C expander at 0x27         ║
 ╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
@@ -69,15 +74,28 @@ PIN_TABLE = """
 ║                  ║            ║  34,39        ║                                      ║
 ╚══════════════════╩════════════╩═══════════════╩══════════════════════════════════════╝
 
-SenseHAT GPIO header usage (the HAT plugs directly onto all 40 pins):
-  The SenseHAT occupies the full GPIO header but only actively uses:
-  • I2C bus (GPIO2/3)  — humidity sensor (HTS221), pressure sensor (LPS25H), LED matrix
-  • SPI bus (GPIO8-11) — LED matrix framebuffer (ATtiny88 co-processor)
-  • GPIO4              — used internally by the HAT (do NOT connect DHT22 if SenseHAT installed)
-  • GPIO0/1            — HAT ID EEPROM
+SenseHAT jumper cable wiring (sensors-only vs full):
+  MINIMUM (sensors only — temp, humidity, pressure, IMU):
+    Pin 1  → 3.3V       Pin 2  → 5V        Pin 6  → GND
+    Pin 3  → SDA        Pin 5  → SCL
 
-  IMPORTANT: If SenseHAT is on the header, DHT22 on GPIO4 may conflict.
-  Consider using a GPIO extender/stacking header or move DHT22 to another pin.
+  FULL (adds LED matrix and joystick via framebuffer):
+    All above, plus:
+    Pin 19 → MOSI       Pin 21 → MISO      Pin 23 → SCLK
+    Pin 24 → CE0        Pin 26 → CE1
+
+  EEPROM (HAT identification — needed for sense-hat library auto-detect):
+    Pin 27 → ID_SD (GPIO0)    Pin 28 → ID_SC (GPIO1)
+
+  I2C device addresses on the SenseHAT:
+    0x5F — HTS221  (humidity + temperature)
+    0x5C — LPS25H  (pressure + temperature)
+    0x1C — LSM9DS1 accelerometer/magnetometer
+    0x6A — LSM9DS1 gyroscope
+    0x46 — ATtiny88 (joystick controller)
+
+  NOTE: GPIO4 (Pin 7) is NOT used by the SenseHAT when wired via jumpers,
+  so DHT22 on GPIO4 is safe to use alongside it.
 """
 
 
@@ -221,7 +239,7 @@ def test_dht22():
     section("DHT22 Temperature & Humidity Sensor  [GPIO4 / Pin 7]")
     print("  Wiring: VCC→3.3V (Pin1), GND→GND (Pin6), DATA→GPIO4 (Pin7)")
     print("  NOTE: Needs a 10kΩ pull-up resistor between DATA and VCC.")
-    print("  NOTE: If SenseHAT is installed, GPIO4 may be in use — check for conflicts.")
+    print("  NOTE: If SenseHAT is on the 40-pin header, GPIO4 may conflict — safe when using jumpers.")
     print("  Taking 3 readings (DHT22 needs ~2s between reads)...\n")
     try:
         import adafruit_dht
@@ -257,12 +275,13 @@ def test_dht22():
 
 
 def test_sensehat():
-    """SenseHAT — full 40-pin header (I2C GPIO2/3, SPI GPIO8-11)."""
-    section("SenseHAT  [40-pin GPIO header]")
-    print("  The SenseHAT plugs directly onto the 40-pin header and uses:")
-    print("  • I2C (GPIO2/Pin3 + GPIO3/Pin5): humidity, pressure sensors, LED matrix")
-    print("  • SPI (GPIO8-11): LED matrix framebuffer co-processor")
-    print("  • GPIO0/1 (Pin27/28): HAT ID EEPROM\n")
+    """SenseHAT — connected via jumper cables (I2C GPIO2/3, SPI GPIO7-11, power)."""
+    section("SenseHAT  [jumper cables]")
+    print("  Jumper wiring required:")
+    print("  • Power:  Pin1→3.3V  Pin2→5V  Pin6→GND")
+    print("  • I2C:    Pin3→SDA (GPIO2)  Pin5→SCL (GPIO3)  [sensors + ATtiny]")
+    print("  • SPI:    Pin19→MOSI  Pin21→MISO  Pin23→SCLK  Pin24→CE0  Pin26→CE1  [LED matrix]")
+    print("  • EEPROM: Pin27→ID_SD (GPIO0)  Pin28→ID_SC (GPIO1)\n")
 
     try:
         from sense_hat import SenseHat
@@ -460,7 +479,7 @@ MENU = """
 ║  2.  Test PIR Motion Sensor   (GPIO17)                   ║
 ║  3.  Test IR Proximity Sensor (GPIO27)                   ║
 ║  4.  Test DHT22 Temp/Humidity (GPIO4)                    ║
-║  5.  Test SenseHAT            (40-pin header)            ║
+║  5.  Test SenseHAT            (jumper cables)            ║
 ║  6.  Test I2C LCD Display     (GPIO2/3, addr 0x27)       ║
 ║  7.  Test Camera              (CSI ribbon)               ║
 ║  8.  Run ALL sensors                                     ║
