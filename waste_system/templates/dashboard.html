@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Waste Management Dashboard</title>
+
+  <!-- Bootstrap 5 (CDN) -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  />
+
+  <style>
+    body { background: #f0f2f5; }
+
+    .card { border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+
+    /* Fill bar */
+    .fill-bar-wrap {
+      background: #e9ecef;
+      border-radius: 8px;
+      overflow: hidden;
+      height: 36px;
+    }
+    .fill-bar-inner {
+      height: 100%;
+      line-height: 36px;
+      font-weight: 600;
+      color: #fff;
+      text-shadow: 0 1px 2px rgba(0,0,0,.4);
+      transition: width 0.8s ease;
+      min-width: 2rem;
+      text-align: right;
+      padding-right: 8px;
+    }
+
+    /* Alert banner */
+    .alert-banner {
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: .6; }
+    }
+
+    /* Sensor cards */
+    .reading-label { font-size: .75rem; text-transform: uppercase; color: #6c757d; }
+    .reading-value { font-size: 1.6rem; font-weight: 700; }
+    .reading-unit  { font-size: .85rem; color: #6c757d; }
+
+    /* ThingSpeak iframes */
+    .ts-chart { width: 100%; height: 260px; border: none; border-radius: 8px; }
+
+    /* Deposit image */
+    .deposit-img { width: 100%; border-radius: 8px; max-height: 320px; object-fit: cover; }
+
+    /* Collected button */
+    .btn-collect { font-size: 1.1rem; padding: .65rem 2rem; }
+  </style>
+</head>
+<body>
+
+<!-- ── Navbar ────────────────────────────────────────────────────────────── -->
+<nav class="navbar navbar-dark bg-dark">
+  <div class="container-fluid">
+    <span class="navbar-brand fw-bold">
+      &#9851; Smart Office Waste Management
+    </span>
+    <span class="text-secondary small">{{ now }}</span>
+  </div>
+</nav>
+
+<div class="container-fluid py-4 px-4">
+
+  <!-- ── Alert banner ───────────────────────────────────────────────────── -->
+  {% if state.alert %}
+  <div class="alert alert-danger alert-banner fw-bold fs-5 text-center mb-4" role="alert">
+    &#9888; BIN FULL — COLLECTION REQUIRED ({{ fill_pct }}% capacity)
+  </div>
+  {% endif %}
+
+  <!-- ── Row 1: Fill + Collect button ─────────────────────────────────── -->
+  <div class="row g-3 mb-3">
+
+    <!-- Fill level card -->
+    <div class="col-12 col-lg-8">
+      <div class="card p-4 h-100">
+        <h5 class="card-title mb-3">Bin Fill Level</h5>
+
+        <div class="fill-bar-wrap mb-2">
+          <div
+            class="fill-bar-inner bg-{{ fill_colour }}"
+            style="width: {{ [fill_pct, 100] | min }}%"
+          >
+            {{ fill_pct }}%
+          </div>
+        </div>
+
+        <div class="d-flex justify-content-between text-muted small mb-3">
+          <span>0%</span>
+          <span class="text-warning">50%</span>
+          <span class="text-danger">{{ alert_thr }}% (Alert)</span>
+          <span>100%</span>
+        </div>
+
+        <p class="mb-0 text-muted small">
+          Measured distance: <strong>{{ state.distance_cm }} cm</strong>
+          &nbsp;|&nbsp;
+          Last updated: <strong>{{ state.timestamp }}</strong>
+        </p>
+      </div>
+    </div>
+
+    <!-- Collect action card -->
+    <div class="col-12 col-lg-4">
+      <div class="card p-4 h-100 d-flex flex-column justify-content-between">
+        <div>
+          <h5 class="card-title">Collection Action</h5>
+          <p class="text-muted small">
+            Press the button below after emptying the bin. This resets the fill
+            level and usage counters.
+          </p>
+        </div>
+        <form method="POST" action="/bin/collected">
+          <button
+            type="submit"
+            class="btn btn-{% if state.alert %}danger{% else %}outline-secondary{% endif %} btn-collect w-100"
+          >
+            &#10003; Mark as Collected
+          </button>
+        </form>
+      </div>
+    </div>
+
+  </div><!-- /row 1 -->
+
+  <!-- ── Row 2: Sensor readings ─────────────────────────────────────────── -->
+  <div class="row g-3 mb-3">
+
+    <!-- Bin micro-environment (DHT22) -->
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card p-3 h-100">
+        <h6 class="card-title text-muted mb-3">&#127759; Bin Environment (DHT22)</h6>
+        <div class="row text-center g-2">
+          <div class="col-6">
+            <div class="reading-label">Temperature</div>
+            <div class="reading-value text-danger">
+              {% if state.bin_temp is not none %}{{ state.bin_temp }}{% else %}—{% endif %}
+            </div>
+            <div class="reading-unit">°C</div>
+          </div>
+          <div class="col-6">
+            <div class="reading-label">Humidity</div>
+            <div class="reading-value text-primary">
+              {% if state.bin_humidity is not none %}{{ state.bin_humidity }}{% else %}—{% endif %}
+            </div>
+            <div class="reading-unit">%RH</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Office ambient (SenseHat) -->
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card p-3 h-100">
+        <h6 class="card-title text-muted mb-3">&#127968; Office Ambient (SenseHat)</h6>
+        <div class="row text-center g-2">
+          <div class="col-4">
+            <div class="reading-label">Temp</div>
+            <div class="reading-value text-danger">
+              {% if state.office_temp is not none %}{{ state.office_temp }}{% else %}—{% endif %}
+            </div>
+            <div class="reading-unit">°C</div>
+          </div>
+          <div class="col-4">
+            <div class="reading-label">Humidity</div>
+            <div class="reading-value text-primary">
+              {% if state.office_humidity is not none %}{{ state.office_humidity }}{% else %}—{% endif %}
+            </div>
+            <div class="reading-unit">%RH</div>
+          </div>
+          <div class="col-4">
+            <div class="reading-label">Pressure</div>
+            <div class="reading-value text-success" style="font-size:1.1rem">
+              {% if state.office_pressure is not none %}{{ state.office_pressure }}{% else %}—{% endif %}
+            </div>
+            <div class="reading-unit">hPa</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Usage counters -->
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card p-3 h-100">
+        <h6 class="card-title text-muted mb-3">&#128200; Usage Counters</h6>
+        <div class="row text-center g-2">
+          <div class="col-6">
+            <div class="reading-label">Approaches (PIR)</div>
+            <div class="reading-value text-warning">{{ state.pir_count }}</div>
+            <div class="reading-unit">events</div>
+          </div>
+          <div class="col-6">
+            <div class="reading-label">Deposits (IR)</div>
+            <div class="reading-value text-info">{{ state.ir_count }}</div>
+            <div class="reading-unit">events</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Latest deposit image -->
+    <div class="col-12 col-md-6 col-xl-3">
+      <div class="card p-3 h-100">
+        <h6 class="card-title text-muted mb-3">&#128247; Latest Deposit Image</h6>
+        {% if has_image %}
+          <img src="{{ image_url }}" alt="Latest deposit" class="deposit-img" />
+        {% else %}
+          <div class="text-center text-muted py-4">
+            <div style="font-size:3rem">&#128247;</div>
+            <div class="small">No deposit image yet</div>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+  </div><!-- /row 2 -->
+
+  <!-- ── Row 3: ThingSpeak charts ───────────────────────────────────────── -->
+  <div class="row g-3">
+    <div class="col-12">
+      <div class="card p-4">
+        <h5 class="card-title mb-3">
+          Historical Data
+          <small class="text-muted fw-normal fs-6">
+            — ThingSpeak Channel&nbsp;
+            <a
+              href="https://thingspeak.com/channels/{{ channel_id }}"
+              target="_blank"
+              rel="noopener"
+            >{{ channel_id }}</a>
+          </small>
+        </h5>
+        <div class="row g-3">
+          {% for chart in charts %}
+          <div class="col-12 col-sm-6 col-xl-3">
+            <p class="mb-1 small fw-semibold text-muted">{{ chart.title }}</p>
+            <iframe
+              src="{{ chart.src }}"
+              class="ts-chart"
+              title="{{ chart.title }}"
+              loading="lazy"
+            ></iframe>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div><!-- /row 3 -->
+
+</div><!-- /container -->
+
+<!-- ── Bootstrap JS ───────────────────────────────────────────────────────── -->
+<script
+  src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+  integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmFRB4GFJq7fJVt7VoHJ7BoIYGO"
+  crossorigin="anonymous"
+></script>
+
+<!-- ── Live-update polling via /api/status ───────────────────────────────── -->
+<script>
+(function () {
+  const POLL_INTERVAL_MS = 15000;  // poll every 15 s
+
+  function pct(value, max) {
+    return Math.min(100, Math.max(0, value));
+  }
+
+  function colourClass(fill) {
+    if (fill >= 80) return "bg-danger";
+    if (fill >= 50) return "bg-warning";
+    return "bg-success";
+  }
+
+  async function refresh() {
+    try {
+      const resp  = await fetch("/api/status");
+      if (!resp.ok) return;
+      const data  = await resp.json();
+      const fill  = parseFloat(data.fill_pct) || 0;
+
+      // Fill bar
+      const bar = document.querySelector(".fill-bar-inner");
+      if (bar) {
+        bar.style.width   = pct(fill) + "%";
+        bar.textContent   = fill.toFixed(1) + "%";
+        bar.className     = "fill-bar-inner " + colourClass(fill);
+      }
+
+      // Alert banner — simple page reload when alert state changes to avoid
+      // partial DOM surgery; the flash is acceptable at 15 s intervals.
+      const hasAlertBanner = !!document.querySelector(".alert-banner");
+      if (data.alert !== hasAlertBanner) {
+        window.location.reload();
+      }
+
+    } catch (e) {
+      console.warn("Status poll failed:", e);
+    }
+  }
+
+  setInterval(refresh, POLL_INTERVAL_MS);
+})();
+</script>
+
+</body>
+</html>
