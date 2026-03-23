@@ -6,7 +6,7 @@ Raspberry Pi 4B sensor loop with MQTT + HTTP fallback publishing.
 Hardware (BCM pin numbering):
   HC-SR04   TRIG→GPIO23, ECHO→GPIO24 (via voltage divider)
   PIR        GPIO17
-  IR prox    GPIO27  (deposit → triggers camera)
+  IR prox    GPIO22  (active-low: LOW=deposit detected → triggers camera)
   DHT22      GPIO4   (inside bin)
   SenseHat   GPIO header
   LCD 16×2   I2C (SDA/SCL)
@@ -28,7 +28,7 @@ import RPi.GPIO as GPIO
 import adafruit_dht
 import board
 from sense_hat import SenseHat
-from RPLCD.i2c import CharLCD
+import smbus
 from picamera2 import Picamera2
 import paho.mqtt.client as mqtt
 
@@ -58,17 +58,42 @@ dht_sensor = adafruit_dht.DHT22(board.D4)  # GPIO4
 sense      = SenseHat()
 sense.clear()
 
-lcd = CharLCD(
-    i2c_expander="PCF8574",
-    address=0x27,       # common PCF8574 address; adjust if needed (0x3F)
-    port=1,
-    cols=16,
-    rows=2,
-    dotsize=8,
-    charmap="A02",
-    auto_linebreaks=True,
-    backlight_enabled=True,
-)
+_lcd_bus  = smbus.SMBus(1)
+_LCD_ADDR = 0x3e
+
+def _lcd_command(cmd):
+    _lcd_bus.write_byte_data(_LCD_ADDR, 0x00, cmd)
+    time.sleep(0.002)
+
+def _lcd_data(val):
+    _lcd_bus.write_byte_data(_LCD_ADDR, 0x40, val)
+    time.sleep(0.001)
+
+def _lcd_init():
+    time.sleep(0.05)
+    _lcd_command(0x38)
+    _lcd_command(0x39)
+    _lcd_command(0x14)
+    _lcd_command(0x70)
+    _lcd_command(0x56)
+    _lcd_command(0x6c)
+    time.sleep(0.2)
+    _lcd_command(0x38)
+    _lcd_command(0x0C)
+    _lcd_command(0x01)
+    time.sleep(0.01)
+
+def _lcd_set_cursor(line, pos):
+    if line == 0:
+        _lcd_command(0x80 + pos)
+    elif line == 1:
+        _lcd_command(0xC0 + pos)
+
+def _lcd_write(text):
+    for c in text:
+        _lcd_data(ord(c))
+
+_lcd_init()
 
 camera = Picamera2()
 cam_config = camera.create_still_configuration(
@@ -165,12 +190,14 @@ def update_led_matrix(fill_pct: float):
 
 def update_lcd(fill_pct: float):
     """Write fill % and status to 16×2 LCD."""
-    line1 = f"Fill: {fill_pct:5.1f}%     "[:16]
-    line2 = "ALERT-COLLECT   " if fill_pct >= config.FILL_ALERT_THRESHOLD else "OK              "
-    lcd.clear()
-    lcd.write_string(line1)
-    lcd.crlf()
-    lcd.write_string(line2[:16])
+    line1 = f"Fill: {fill_pct:5.1f}%"
+    line2 = "ALERT-COLLECT" if fill_pct >= config.FILL_ALERT_THRESHOLD else "OK"
+    _lcd_command(0x01)
+    time.sleep(0.01)
+    _lcd_set_cursor(0, 0)
+    _lcd_write(line1)
+    _lcd_set_cursor(1, 0)
+    _lcd_write(line2)
 
 
 def capture_image() -> str:
@@ -204,8 +231,8 @@ def ir_callback(channel):
     threading.Thread(target=capture_image, daemon=True).start()
 
 
-GPIO.add_event_detect(config.PIN_PIR, GPIO.RISING, callback=pir_callback, bouncetime=500)
-GPIO.add_event_detect(config.PIN_IR,  GPIO.RISING, callback=ir_callback,  bouncetime=1000)
+GPIO.add_event_detect(config.PIN_PIR, GPIO.RISING,  callback=pir_callback, bouncetime=500)
+GPIO.add_event_detect(config.PIN_IR,  GPIO.FALLING, callback=ir_callback,  bouncetime=1000)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,7 +459,7 @@ def main():
             mqtt_client.disconnect()
         camera.stop()
         dht_sensor.exit()
-        lcd.clear()
+        _lcd_command(0x01)
         sense.clear()
         GPIO.cleanup()
         log.info("GPIO and peripherals cleaned up.")

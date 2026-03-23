@@ -28,7 +28,7 @@ SAMPLE_INTERVAL_FAST   = 10 # seconds
 PIN_TRIG = 23   # HC-SR04 trigger
 PIN_ECHO = 24   # HC-SR04 echo (via voltage divider — 5 V → 3.3 V)
 PIN_PIR  = 17   # PIR motion sensor
-PIN_IR   = 27   # IR proximity sensor (deposit detection)
+PIN_IR   = 22   # IR proximity sensor (deposit detection)
 PIN_DHT  = 4    # DHT22 data pin (inside bin)
 
 # ── Flask ─────────────────────────────────────────────────────────────────────

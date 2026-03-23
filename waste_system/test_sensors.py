@@ -8,10 +8,10 @@ Each test can be run independently from the menu.
 Hardware (BCM pin numbering):
   HC-SR04   TRIG→GPIO23 (Pin 16), ECHO→GPIO24 (Pin 18) via voltage divider 5V→3.3V
   PIR        GPIO17 (Pin 11)
-  IR prox    GPIO27 (Pin 13)
+  IR prox    GPIO22 (Pin 15)
   DHT22      GPIO4  (Pin 7)
   SenseHAT   Jumper cables — see pin table below (I2C, SPI, power, EEPROM)
-  LCD 16×2   I2C SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), PCF8574 at 0x27
+  LCD 16×2   I2C SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), 1602I2C at 0x3e
   Camera     CSI ribbon connector (not GPIO)
 """
 
@@ -22,7 +22,7 @@ import sys
 PIN_TRIG = 23
 PIN_ECHO = 24
 PIN_PIR  = 17
-PIN_IR   = 27
+PIN_IR   = 22
 PIN_DHT  = 4
 BIN_DEPTH_CM = 30
 
@@ -39,40 +39,66 @@ OFF    = (0,   0,   0)
 # ─────────────────────────────────────────────────────────────────────────────
 
 PIN_TABLE = """
-╔══════════════════╦════════════╦═══════════════╦══════════════════════════════════════╗
-║ Sensor/Device    ║  BCM GPIO  ║ Physical Pin  ║ Notes                                ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ HC-SR04 TRIG     ║  GPIO23    ║  Pin 16       ║ Output — send 10µs pulse             ║
-║ HC-SR04 ECHO     ║  GPIO24    ║  Pin 18       ║ Input  — NEEDS voltage divider!      ║
-║                  ║            ║               ║ (5V→3.3V: 1kΩ + 2kΩ resistors)      ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ PIR motion       ║  GPIO17    ║  Pin 11       ║ Input, RISING edge trigger           ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ IR proximity     ║  GPIO27    ║  Pin 13       ║ Input, RISING edge trigger           ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ DHT22            ║  GPIO4     ║  Pin 7        ║ 1-wire data (adafruit-circuitpython) ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ SenseHAT — 3.3V  ║  —         ║  Pin 1        ║ 3.3V power to SenseHAT               ║
-║ SenseHAT — 5V    ║  —         ║  Pin 2        ║ 5V power to SenseHAT                 ║
-║ SenseHAT — GND   ║  —         ║  Pin 6        ║ Ground                               ║
-║ SenseHAT — I2C   ║  GPIO2/3   ║  Pin 3/5      ║ SDA/SCL — all sensors + ATtiny LED   ║
-║ SenseHAT — MOSI  ║  GPIO10    ║  Pin 19       ║ SPI — LED matrix framebuffer         ║
-║ SenseHAT — MISO  ║  GPIO9     ║  Pin 21       ║ SPI — LED matrix framebuffer         ║
-║ SenseHAT — SCLK  ║  GPIO11    ║  Pin 23       ║ SPI — LED matrix framebuffer         ║
-║ SenseHAT — CE0   ║  GPIO8     ║  Pin 24       ║ SPI Chip Enable 0                    ║
-║ SenseHAT — CE1   ║  GPIO7     ║  Pin 26       ║ SPI Chip Enable 1                    ║
-║ SenseHAT — EEPROM║  GPIO0/1   ║  Pin 27/28    ║ HAT ID EEPROM (ID_SD / ID_SC)        ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ LCD 16×2 (I2C)   ║  GPIO2/3   ║  Pin 3/5      ║ PCF8574 I2C expander at 0x27         ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ Camera           ║  (CSI)     ║  CSI ribbon   ║ Not GPIO — uses dedicated CSI port   ║
-╠══════════════════╬════════════╬═══════════════╬══════════════════════════════════════╣
-║ 3.3V power       ║  —         ║  Pin 1, 17    ║ For sensors requiring 3.3V           ║
-║ 5V power         ║  —         ║  Pin 2, 4     ║ For HC-SR04, PIR, IR, LCD backlight  ║
-║ Ground           ║  —         ║  Pin 6,9,14,  ║ Common ground for all sensors        ║
-║                  ║            ║  20,25,30,    ║                                      ║
-║                  ║            ║  34,39        ║                                      ║
-╚══════════════════╩════════════╩═══════════════╩══════════════════════════════════════╝
+── Pi 40-pin GPIO Header (physical pin layout) ──────────────────────────────
+  Label                    Pin        Pin   Label
+  ──────────────────────────────────────────────────────────────────────────
+  3.3V  (SenseHAT pwr)  ● [ 1]──[ 2] ●   5V   (SenseHAT / PIR / IR / LCD)
+  SDA   (I2C: LCD+HAT)  ● [ 3]──[ 4] ●   5V
+  SCL   (I2C: LCD+HAT)  ● [ 5]──[ 6] ●   GND  (SenseHAT)
+  DHT22 DATA            ● [ 7]──[ 8] ·
+  GND                   · [ 9]──[10] ·
+  PIR OUT               ● [11]──[12] ·
+  —                     · [13]──[14] ·   GND
+  IR DOUT               ● [15]──[16] ●   HC-SR04 TRIG
+  3.3V                  · [17]──[18] ●   HC-SR04 ECHO  ← 5V→3.3V divider
+  SenseHAT MOSI         ● [19]──[20] ·   GND
+  SenseHAT MISO         ● [21]──[22] ·
+  SenseHAT SCLK         ● [23]──[24] ●   SenseHAT CE0
+  GND                   · [25]──[26] ●   SenseHAT CE1
+  SenseHAT EEPROM SDA   ● [27]──[28] ●   SenseHAT EEPROM SCL
+  —                     · [29]──[30] ·   GND
+  —                     · [31]──[32] ·
+  —                     · [33]──[34] ·   GND
+  —                     · [35]──[36] ·
+  —                     · [37]──[38] ·
+  GND                   · [39]──[40] ·
+  ──────────────────────────────────────────────────────────────────────────
+  ● = connected to this system    · = unused pin
+
+╔══════════════════╦═══════════════╦════════════╦══════════════════════════════════════╗
+║ Sensor/Device    ║ Physical Pin  ║  BCM GPIO  ║ Notes                                ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ HC-SR04 TRIG     ║  Pin 16       ║  GPIO23    ║ Output — send 10µs pulse             ║
+║ HC-SR04 ECHO     ║  Pin 18       ║  GPIO24    ║ Input  — NEEDS voltage divider!      ║
+║                  ║               ║            ║ (5V→3.3V: 1kΩ + 2kΩ resistors)      ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ PIR motion       ║  Pin 11       ║  GPIO17    ║ Input, RISING edge trigger           ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ IR proximity     ║  Pin 15       ║  GPIO22    ║ Input, active-low (0=detected)       ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ DHT22            ║  Pin 7        ║  GPIO4     ║ 1-wire data (adafruit-circuitpython) ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ SenseHAT — 3.3V  ║  Pin 1        ║  —         ║ 3.3V power to SenseHAT               ║
+║ SenseHAT — 5V    ║  Pin 2        ║  —         ║ 5V power to SenseHAT                 ║
+║ SenseHAT — GND   ║  Pin 6        ║  —         ║ Ground                               ║
+║ SenseHAT — I2C   ║  Pin 3/5      ║  GPIO2/3   ║ SDA/SCL — all sensors + ATtiny LED   ║
+║ SenseHAT — MOSI  ║  Pin 19       ║  GPIO10    ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — MISO  ║  Pin 21       ║  GPIO9     ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — SCLK  ║  Pin 23       ║  GPIO11    ║ SPI — LED matrix framebuffer         ║
+║ SenseHAT — CE0   ║  Pin 24       ║  GPIO8     ║ SPI Chip Enable 0                    ║
+║ SenseHAT — CE1   ║  Pin 26       ║  GPIO7     ║ SPI Chip Enable 1                    ║
+║ SenseHAT — EEPROM║  Pin 27/28    ║  GPIO0/1   ║ HAT ID EEPROM (ID_SD / ID_SC)        ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ LCD 16×2 (I2C)   ║  Pin 3/5      ║  GPIO2/3   ║ 1602I2C at 0x3e                      ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ Camera           ║  CSI ribbon   ║  (CSI)     ║ Not GPIO — uses dedicated CSI port   ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ 3.3V power       ║  Pin 1, 17    ║  —         ║ For sensors requiring 3.3V           ║
+║ 5V power         ║  Pin 2, 4     ║  —         ║ For HC-SR04, PIR, IR, LCD backlight  ║
+║ Ground           ║  Pin 6,9,14,  ║  —         ║ Common ground for all sensors        ║
+║                  ║  20,25,30,    ║            ║                                      ║
+║                  ║  34,39        ║            ║                                      ║
+╚══════════════════╩═══════════════╩════════════╩══════════════════════════════════════╝
 
 SenseHAT jumper cable wiring (sensors-only vs full):
   MINIMUM (sensors only — temp, humidity, pressure, IMU):
@@ -203,31 +229,38 @@ def test_pir():
 
 
 def test_ir():
-    """IR proximity sensor — BCM GPIO27 (Pin 13)."""
-    section("IR Proximity Sensor  [GPIO27 / Pin 13]")
-    print("  Wiring: VCC→5V (Pin2), GND→GND (Pin6), OUT→GPIO27 (Pin13)")
-    print("  Listening for 15 seconds — pass an object in front of the IR sensor...\n")
+    """IR proximity sensor — BCM GPIO22 (Pin 15). Active-low: pin reads 0 when object detected."""
+    section("IR Proximity Sensor  [GPIO22 / Pin 15]")
+    print("  Wiring: VCC→5V (Pin2), GND→GND (Pin6), OUT→GPIO22 (Pin15)")
+    print("  Active-low sensor: pin LOW (0) = object detected, HIGH (1) = no object")
+    print("  Polling for 15 seconds — pass an object in front of the IR sensor...\n")
     try:
         import RPi.GPIO as GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
         GPIO.setup(PIN_IR, GPIO.IN)
 
-        count = [0]
+        count = 0
+        deadline = time.time() + 15
+        last_state = None
 
-        def _cb(channel):
-            count[0] += 1
-            print(f"  [OK]  IR event detected! (event #{count[0]})")
+        while time.time() < deadline:
+            state = GPIO.input(PIN_IR)
+            if state != last_state:
+                if state == 0:
+                    count += 1
+                    print(f"  [OK]  Object detected! (event #{count})")
+                else:
+                    print(f"  [--]  No object")
+                last_state = state
+            time.sleep(0.1)
 
-        GPIO.add_event_detect(PIN_IR, GPIO.RISING, callback=_cb, bouncetime=1000)
-        time.sleep(15)
-        GPIO.remove_event_detect(PIN_IR)
         GPIO.cleanup([PIN_IR])
 
-        if count[0] == 0:
+        if count == 0:
             warn("No IR events. Check wiring or adjust sensitivity potentiometer on sensor.")
         else:
-            ok(f"Total events detected: {count[0]}")
+            ok(f"Total detections: {count}")
     except ImportError:
         err("RPi.GPIO not installed. Run: pip install RPi.GPIO")
     except Exception as exc:
@@ -341,66 +374,67 @@ def test_sensehat():
 
 
 def test_lcd():
-    """I2C LCD 16×2 display — SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), address 0x27."""
-    section("I2C LCD 16×2 Display  [SDA=GPIO2/Pin3  SCL=GPIO3/Pin5  addr=0x27]")
-    print("  Wiring: VCC→5V (Pin2), GND→GND (Pin6), SDA→GPIO2 (Pin3), SCL→GPIO3 (Pin5)")
-    print("  PCF8574 I2C expander default address: 0x27 (try 0x3F if not found)\n")
-
-    # Scan I2C bus first
-    try:
-        import subprocess
-        result = subprocess.run(["i2cdetect", "-y", "1"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            print("  I2C bus scan (i2cdetect -y 1):")
-            for line in result.stdout.strip().splitlines():
-                print(f"    {line}")
-            if "27" in result.stdout:
-                ok("Found device at 0x27")
-            elif "3f" in result.stdout.lower():
-                ok("Found device at 0x3F (update LCD address in config.py if needed)")
-            else:
-                warn("No device found at 0x27 or 0x3F — check wiring and I2C is enabled (raspi-config)")
-        print()
-    except FileNotFoundError:
-        warn("i2cdetect not available (install i2c-tools). Skipping bus scan.")
-    except Exception:
-        pass
+    """I2C LCD 16×2 display — SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), address 0x3e."""
+    section("I2C LCD 16×2 Display  [SDA=GPIO2/Pin3  SCL=GPIO3/Pin5  addr=0x3e]")
+    print("  Wiring: VCC→5V (Pin2), GND→GND (Pin6), SDA→GPIO2 (Pin3), SCL→GPIO3 (Pin5)\n")
 
     try:
-        from RPLCD.i2c import CharLCD
-        lcd = CharLCD(
-            i2c_expander="PCF8574",
-            address=0x27,
-            port=1,
-            cols=16,
-            rows=2,
-            dotsize=8,
-            charmap="A02",
-            auto_linebreaks=True,
-            backlight_enabled=True,
-        )
-        ok("LCD initialised at 0x27")
+        import smbus
 
-        lcd.clear()
-        lcd.write_string("Sensor Test OK")
-        lcd.crlf()
-        lcd.write_string("GPIO2/3 I2C")
+        bus  = smbus.SMBus(1)
+        addr = 0x3e
+
+        def command(cmd):
+            bus.write_byte_data(addr, 0x00, cmd)
+            time.sleep(0.002)
+
+        def data(val):
+            bus.write_byte_data(addr, 0x40, val)
+            time.sleep(0.001)
+
+        def init():
+            time.sleep(0.05)
+            command(0x38)
+            command(0x39)
+            command(0x14)
+            command(0x70)
+            command(0x56)
+            command(0x6c)
+            time.sleep(0.2)
+            command(0x38)
+            command(0x0C)
+            command(0x01)
+            time.sleep(0.01)
+
+        def set_cursor(line, pos):
+            if line == 0:
+                command(0x80 + pos)
+            elif line == 1:
+                command(0xC0 + pos)
+
+        def write(text):
+            for c in text:
+                data(ord(c))
+
+        init()
+        ok("LCD initialised at 0x3e")
+
+        command(0x01)
+        time.sleep(0.01)
+        set_cursor(0, 0)
+        write("Sensor Test OK")
+        set_cursor(1, 0)
+        write("GPIO2/3 I2C")
         ok("Written test message to LCD. You should see 'Sensor Test OK' on line 1.")
         time.sleep(3)
 
-        # Toggle backlight
-        print("  Toggling backlight OFF for 1 second...")
-        lcd.backlight_enabled = False
-        time.sleep(1)
-        lcd.backlight_enabled = True
-        ok("Backlight restored.")
-
-        lcd.clear()
+        command(0x01)
+        time.sleep(0.01)
         ok("LCD cleared.")
     except ImportError:
-        err("RPLCD not installed. Run: pip install RPLCD")
+        err("smbus not installed. Run: pip install smbus2")
     except Exception as exc:
-        err(f"LCD error: {exc}  — check address (0x27 vs 0x3F) and I2C wiring")
+        err(f"LCD error: {exc}  — check address and I2C wiring")
 
 
 def test_camera():
@@ -477,10 +511,10 @@ MENU = """
 ║  0.  Show GPIO pin reference table                       ║
 ║  1.  Test HC-SR04 Ultrasonic  (GPIO23/24)                ║
 ║  2.  Test PIR Motion Sensor   (GPIO17)                   ║
-║  3.  Test IR Proximity Sensor (GPIO27)                   ║
+║  3.  Test IR Proximity Sensor (GPIO22)                   ║
 ║  4.  Test DHT22 Temp/Humidity (GPIO4)                    ║
 ║  5.  Test SenseHAT            (jumper cables)            ║
-║  6.  Test I2C LCD Display     (GPIO2/3, addr 0x27)       ║
+║  6.  Test I2C LCD Display     (GPIO2/3, addr 0x3e)       ║
 ║  7.  Test Camera              (CSI ribbon)               ║
 ║  8.  Run ALL sensors                                     ║
 ║  9.  Exit                                                ║
