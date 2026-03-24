@@ -17,6 +17,7 @@ Hardware (BCM pin numbering):
 
 import time
 import sys
+import os
 
 # ── Pin constants (mirrors config.py) ─────────────────────────────────────────
 PIN_TRIG = 23
@@ -25,6 +26,12 @@ PIN_PIR  = 17
 PIN_IR   = 22
 PIN_DHT  = 4
 BIN_DEPTH_CM = 30
+
+# ── TFLite paths (mirrors config.py) ──────────────────────────────────────────
+TFLITE_PATH          = "/home/group28/Documents/IOTProject/IOTProject/waste_system/trash_classifier.tflite"
+LABELS_PATH          = "/home/group28/Documents/IOTProject/IOTProject/waste_system/labels.txt"
+IMG_SIZE             = 224
+CONFIDENCE_THRESHOLD = 0.6
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 RED    = (200, 0,   0)
@@ -352,15 +359,6 @@ def test_sensehat():
         ok(f"Magnetometer (µT):  x={mag['x']:.1f}    y={mag['y']:.1f}    z={mag['z']:.1f}")
         ok(f"Orientation (°):    roll={orientation['roll']:.1f}  pitch={orientation['pitch']:.1f}  yaw={orientation['yaw']:.1f}")
 
-        # ── Joystick ──────────────────────────────────────────────────────────
-        print("\n  --- Joystick ---")
-        print("  Press the joystick within 5 seconds to test it...")
-        event = sense.stick.wait_for_event(emptybuffer=True)
-        if event:
-            ok(f"Joystick event: direction={event.direction}  action={event.action}")
-        else:
-            warn("No joystick event within timeout.")
-
         # ── LED matrix ────────────────────────────────────────────────────────
         print("\n  --- 8×8 LED Matrix ---")
         print("  Cycling colours: RED → GREEN → BLUE → YELLOW → OFF")
@@ -372,6 +370,55 @@ def test_sensehat():
 
         sense.clear()
         ok("LED matrix test complete.")
+
+    except ImportError:
+        err("sense-hat not installed. Run: pip install sense-hat")
+    except Exception as exc:
+        err(f"Unexpected error: {exc}")
+
+
+def test_sensehat_leds():
+    """SenseHAT 8×8 LED matrix — standalone colour and pattern test."""
+    section("SenseHAT 8×8 LED Matrix  [SPI GPIO7-11 + I2C]")
+    print("  SPI wiring required: Pin19→MOSI  Pin21→MISO  Pin23→SCLK  Pin24→CE0  Pin26→CE1")
+    print("  Power:  Pin1→3.3V  Pin2→5V  Pin6→GND\n")
+
+    try:
+        from sense_hat import SenseHat
+        sense = SenseHat()
+
+        # ── Solid colour cycle ────────────────────────────────────────────────
+        print("  [1/3] Solid colour cycle: RED → GREEN → BLUE → YELLOW → OFF")
+        for label, colour in [("RED", RED), ("GREEN", GREEN), ("BLUE", BLUE), ("YELLOW", YELLOW), ("OFF", OFF)]:
+            sense.clear(colour)
+            print(f"    {label}...", end=" ", flush=True)
+            time.sleep(0.8)
+            print("done")
+        ok("Solid colour cycle complete.")
+
+        # ── Fill level simulation ─────────────────────────────────────────────
+        print("\n  [2/3] Fill-level simulation (green→red as fill increases)")
+        for fill in range(0, 101, 10):
+            colour = RED if fill >= 80 else GREEN
+            sense.clear(colour)
+            print(f"    fill={fill:3d}%  colour={'RED  ' if fill >= 80 else 'GREEN'}", end="\r", flush=True)
+            time.sleep(0.3)
+        print()
+        sense.clear()
+        ok("Fill-level simulation complete.")
+
+        # ── Pixel-level walk ──────────────────────────────────────────────────
+        print("\n  [3/3] Single-pixel walk across all 64 LEDs (BLUE)")
+        sense.clear()
+        for i in range(64):
+            x, y = i % 8, i // 8
+            sense.set_pixel(x, y, BLUE)
+            time.sleep(0.03)
+            sense.set_pixel(x, y, OFF)
+        sense.clear()
+        ok("Pixel walk complete.")
+
+        ok("LED matrix test PASSED — all 64 pixels exercised.")
 
     except ImportError:
         err("sense-hat not installed. Run: pip install sense-hat")
@@ -472,6 +519,127 @@ def test_camera():
         err(f"Camera error: {exc}")
 
 
+def test_camera_live():
+    """Real-time camera feed with TFLite inference overlay — proves camera works live."""
+    section("Camera — Live Video  [CSI ribbon connector]")
+    print("  Streams live video from the Pi Camera with TFLite classification overlay.")
+    print("  Press 'q' in the OpenCV window (or Ctrl+C here) to stop.")
+    print("  Runs for up to 60 seconds.\n")
+    print("  NOTE: Requires a display (HDMI / VNC / X forwarding).")
+    print("  Headless fallback: saves a labelled frame every 3 s to /tmp/\n")
+
+    try:
+        import cv2
+        import numpy as np
+        from picamera2 import Picamera2
+    except ImportError as e:
+        err(f"Missing dependency: {e}  —  run: pip install opencv-python picamera2")
+        return
+
+    # ── Try to load TFLite model ──────────────────────────────────────────────
+    interp = inp_d = outp_d = class_names = None
+    try:
+        try:
+            import tflite_runtime.interpreter as tflite
+        except ImportError:
+            import tensorflow.lite as tflite  # type: ignore
+        with open(LABELS_PATH) as f:
+            class_names = [line.strip() for line in f]
+        interp = tflite.Interpreter(model_path=TFLITE_PATH)
+        interp.allocate_tensors()
+        inp_d  = interp.get_input_details()
+        outp_d = interp.get_output_details()
+        ok(f"TFLite model loaded — {len(class_names)} classes: {class_names}")
+    except FileNotFoundError:
+        warn(f"TFLite model not found at {TFLITE_PATH} — showing live feed without inference")
+    except Exception as exc:
+        warn(f"TFLite load failed ({exc}) — showing live feed without inference")
+
+    # ── Detect headless mode ──────────────────────────────────────────────────
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not has_display:
+        warn("No DISPLAY detected — headless mode: saving frames to /tmp/live_frame_*.jpg")
+
+    # ── Open camera ───────────────────────────────────────────────────────────
+    try:
+        cam = Picamera2()
+        cfg = cam.create_video_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+        )
+        cam.configure(cfg)
+        cam.start()
+        time.sleep(1)
+        ok("Camera started (640×480 RGB)")
+    except Exception as exc:
+        err(f"Camera failed to open: {exc}")
+        return
+
+    def _infer(frame_rgb):
+        """Return (label, pct_str) or ('', '') if no model."""
+        if interp is None:
+            return "", ""
+        img = cv2.resize(frame_rgb, (IMG_SIZE, IMG_SIZE))
+        arr = np.expand_dims(img.astype(np.float32) / 255.0, axis=0)
+        interp.set_tensor(inp_d[0]['index'], arr)
+        interp.invoke()
+        scores = interp.get_tensor(outp_d[0]['index'])[0]
+        idx    = int(np.argmax(scores))
+        conf   = float(scores[idx])
+        label  = class_names[idx] if conf >= CONFIDENCE_THRESHOLD else "uncertain"
+        return label, f"{conf:.0%}"
+
+    print("\n  Streaming... (press 'q' in window or Ctrl+C to stop)\n")
+    frame_count  = 0
+    save_counter = 0
+    deadline     = time.time() + 60
+
+    try:
+        while time.time() < deadline:
+            frame = cam.capture_array()        # RGB888 numpy array (H×W×3)
+            frame_count += 1
+
+            label, pct = _infer(frame)
+
+            # Build display frame (convert RGB→BGR for OpenCV)
+            display = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            # Overlay label
+            if label:
+                colour = (0, 200, 0) if label != "uncertain" else (0, 140, 255)
+                cv2.putText(display, f"{label}  {pct}", (10, 36),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.1, colour, 2, cv2.LINE_AA)
+            cv2.putText(display, f"frame {frame_count}", (10, display.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+            if has_display:
+                cv2.imshow("Pi Camera — Live (press q to quit)", display)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    print("  [q pressed — stopping]")
+                    break
+            else:
+                # Headless: save every 3 s
+                if frame_count % 90 == 1:
+                    path = f"/tmp/live_frame_{save_counter:03d}.jpg"
+                    cv2.imwrite(path, display)
+                    save_counter += 1
+                    size = os.path.getsize(path)
+                    msg  = f"{label} {pct}" if label else "no inference"
+                    ok(f"Saved {path}  ({size} bytes)  [{msg}]")
+
+            if label:
+                print(f"  frame {frame_count:4d}  →  {label:15s} {pct}", end="\r", flush=True)
+
+    except KeyboardInterrupt:
+        print("\n  [Ctrl+C — stopping]")
+    finally:
+        cam.stop()
+        if has_display:
+            cv2.destroyAllWindows()
+
+    print(f"\n\n  Total frames captured: {frame_count}")
+    ok("Live camera test complete.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Run all sensors
 # ─────────────────────────────────────────────────────────────────────────────
@@ -482,13 +650,15 @@ def test_all():
     print("  Each test runs independently. Failures in one do not stop the rest.\n")
 
     tests = [
-        ("HC-SR04 Ultrasonic",  test_ultrasonic),
-        ("PIR Motion Sensor",   test_pir),
-        ("IR Proximity Sensor", test_ir),
-        ("DHT22 Temp/Humidity", test_dht22),
-        ("SenseHAT",            test_sensehat),
-        ("I2C LCD Display",     test_lcd),
-        ("Camera",              test_camera),
+        ("HC-SR04 Ultrasonic",   test_ultrasonic),
+        ("PIR Motion Sensor",    test_pir),
+        ("IR Proximity Sensor",  test_ir),
+        ("DHT22 Temp/Humidity",  test_dht22),
+        ("SenseHAT",             test_sensehat),
+        ("SenseHAT LEDs",        test_sensehat_leds),
+        ("I2C LCD Display",      test_lcd),
+        ("Camera (still)",       test_camera),
+        ("Camera (live video)",  test_camera_live),
     ]
 
     results = {}
@@ -520,23 +690,29 @@ MENU = """
 ║  3.  Test IR Proximity Sensor (GPIO22)                   ║
 ║  4.  Test DHT22 Temp/Humidity (GPIO4)                    ║
 ║  5.  Test SenseHAT            (jumper cables)            ║
+║  S.  Test SenseHAT LEDs only  (8×8 matrix)               ║
 ║  6.  Test I2C LCD Display     (GPIO2/3, addr 0x3e)       ║
-║  7.  Test Camera              (CSI ribbon)               ║
+║  7.  Test Camera              (CSI ribbon — still)       ║
 ║  8.  Run ALL sensors                                     ║
 ║  9.  Exit                                                ║
+║  L.  Live Camera + TFLite inference (real-time video)    ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
 ACTIONS = {
-    "0": ("Show pin reference table",  lambda: print(PIN_TABLE)),
-    "1": ("HC-SR04 Ultrasonic",        test_ultrasonic),
-    "2": ("PIR Motion Sensor",         test_pir),
-    "3": ("IR Proximity Sensor",       test_ir),
-    "4": ("DHT22 Temp/Humidity",       test_dht22),
-    "5": ("SenseHAT",                  test_sensehat),
-    "6": ("I2C LCD Display",           test_lcd),
-    "7": ("Camera",                    test_camera),
-    "8": ("Run ALL sensors",           test_all),
+    "0": ("Show pin reference table",              lambda: print(PIN_TABLE)),
+    "1": ("HC-SR04 Ultrasonic",                    test_ultrasonic),
+    "2": ("PIR Motion Sensor",                     test_pir),
+    "3": ("IR Proximity Sensor",                   test_ir),
+    "4": ("DHT22 Temp/Humidity",                   test_dht22),
+    "5": ("SenseHAT",                              test_sensehat),
+    "s": ("SenseHAT LEDs only",                    test_sensehat_leds),
+    "S": ("SenseHAT LEDs only",                    test_sensehat_leds),
+    "6": ("I2C LCD Display",                       test_lcd),
+    "7": ("Camera (still capture)",                test_camera),
+    "8": ("Run ALL sensors",                       test_all),
+    "l": ("Live camera + TFLite (real-time video)", test_camera_live),
+    "L": ("Live camera + TFLite (real-time video)", test_camera_live),
 }
 
 
@@ -548,7 +724,7 @@ def main():
     while True:
         print(MENU)
         try:
-            choice = input("Enter option (0-9): ").strip()
+            choice = input("Enter option (0-9, S, L): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             break

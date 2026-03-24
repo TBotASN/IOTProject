@@ -5,12 +5,13 @@ Raspberry Pi 4B sensor loop with MQTT + HTTP fallback publishing.
 
 Hardware (BCM pin numbering):
   HC-SR04   TRIG→GPIO23, ECHO→GPIO24 (via voltage divider)
-  PIR        GPIO17
-  IR prox    GPIO22  (active-low: LOW=deposit detected → triggers camera)
-  DHT22      GPIO4   (inside bin)
-  SenseHat   GPIO header
-  LCD 16×2   I2C (SDA/SCL)
-  Camera     CSI ribbon
+  PIR        GPIO17  (hand-wave → LED on, simulates motor open)
+  IR prox    GPIO22  (active-low: LOW=lid closed, HIGH=lid open)
+  DHT22      GPIO4   (inside bin — temperature + humidity)
+  LED        GPIO27  (motor actuation indicator)
+  SenseHat   GPIO header (office ambient)
+  LCD 16×2   I2C (SDA/SCL) — env display when closed, object when open
+  Camera     CSI ribbon (classifies thrown object when lid open)
 """
 
 import time
@@ -21,9 +22,12 @@ import os
 import sys
 import logging
 from datetime import datetime
+from collections import deque
 import http.client
 import urllib.parse
 
+import numpy as np
+import cv2
 import RPi.GPIO as GPIO
 import adafruit_dht
 import board
@@ -31,6 +35,14 @@ from sense_hat import SenseHat
 import smbus
 from picamera2 import Picamera2
 import paho.mqtt.client as mqtt
+
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    try:
+        import tensorflow.lite as tflite
+    except ImportError:
+        tflite = None
 
 import config
 
@@ -52,6 +64,7 @@ GPIO.setup(config.PIN_TRIG, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(config.PIN_ECHO, GPIO.IN)
 GPIO.setup(config.PIN_PIR,  GPIO.IN)
 GPIO.setup(config.PIN_IR,   GPIO.IN)
+GPIO.setup(config.PIN_LED,  GPIO.OUT, initial=GPIO.LOW)
 
 # ── Sensor objects ────────────────────────────────────────────────────────────
 dht_sensor = adafruit_dht.DHT22(board.D4)  # GPIO4
@@ -105,11 +118,116 @@ camera.configure(cam_config)
 camera.start()
 time.sleep(2)  # warm-up
 
+# ── TFLite inference (optional — skipped if model files are missing) ───────────
+_interp      = None
+_inp         = None
+_outp        = None
+_class_names = []
+
+def _load_inference_model():
+    """Load TFLite model and labels. Returns True on success, False if files are missing."""
+    global _interp, _inp, _outp, _class_names
+    if tflite is None:
+        log.warning("TFLite not available — install tflite-runtime or tensorflow")
+        return False
+    try:
+        with open(config.LABELS_PATH) as f:
+            _class_names = [line.strip() for line in f]
+        _interp = tflite.Interpreter(model_path=config.TFLITE_PATH)
+        _interp.allocate_tensors()
+        _inp  = _interp.get_input_details()
+        _outp = _interp.get_output_details()
+        log.info("TFLite model loaded — classes: %s", _class_names)
+        return True
+    except FileNotFoundError as exc:
+        log.warning("TFLite model/labels not found (%s) — classification disabled", exc)
+        return False
+    except Exception as exc:
+        log.error("TFLite load error: %s — classification disabled", exc)
+        return False
+
+_inference_available = _load_inference_model()
+
+
+def _classify_frame(frame_rgb: np.ndarray) -> np.ndarray:
+    """Run a single RGB frame through the model; return raw score array."""
+    img = cv2.resize(frame_rgb, (config.IMG_SIZE, config.IMG_SIZE))
+    img = np.expand_dims(img.astype(np.float32) / 255.0, axis=0)
+    _interp.set_tensor(_inp[0]['index'], img)
+    _interp.invoke()
+    return _interp.get_tensor(_outp[0]['index'])[0]
+
+
+def _classify_deposit() -> tuple[str | None, float]:
+    """
+    Capture CAPTURE_FRAMES frames from the lores stream, average scores
+    (temporal smoothing), and return (label, confidence).
+    """
+    score_buf = deque(maxlen=config.SMOOTH_WINDOW)
+    for _ in range(config.CAPTURE_FRAMES):
+        frame = camera.capture_array("lores")
+        # picamera2 lores delivers YUV420 by default; main stream gives RGB
+        # Use main stream for a reliable RGB array
+        frame = camera.capture_array("main")
+        scores = _classify_frame(frame[:, :, :3])  # drop alpha if present
+        score_buf.append(scores)
+        time.sleep(0.05)
+    if not score_buf:
+        return None, 0.0
+    smoothed   = np.mean(score_buf, axis=0)
+    idx        = int(np.argmax(smoothed))
+    label      = _class_names[idx]
+    confidence = float(smoothed[idx])
+    return label, confidence
+
+
+# ── Local MQTT (material classification) ──────────────────────────────────────
+_local_mqtt: mqtt.Client | None = None
+_local_mqtt_connected           = False
+
+
+def _init_local_mqtt() -> mqtt.Client | None:
+    """Connect to local MQTT broker for material classification publishing."""
+    def _on_connect(client, userdata, flags, rc):
+        global _local_mqtt_connected
+        _local_mqtt_connected = (rc == 0)
+        if rc == 0:
+            log.info("Local MQTT: connected to %s:%d", config.LOCAL_MQTT_BROKER, config.LOCAL_MQTT_PORT)
+        else:
+            log.warning("Local MQTT: connection failed (rc=%d)", rc)
+
+    def _on_disconnect(client, userdata, rc):
+        global _local_mqtt_connected
+        _local_mqtt_connected = False
+
+    client = mqtt.Client()
+    client.on_connect    = _on_connect
+    client.on_disconnect = _on_disconnect
+    try:
+        client.connect(config.LOCAL_MQTT_BROKER, config.LOCAL_MQTT_PORT, keepalive=60)
+        client.loop_start()
+        return client
+    except Exception as exc:
+        log.warning("Local MQTT: could not connect (%s) — material publishing disabled", exc)
+        return None
+
+_local_mqtt = _init_local_mqtt()
+
 # ── Shared state ──────────────────────────────────────────────────────────────
-state_lock      = threading.Lock()
-pir_count       = 0
-ir_count        = 0
-collected_flag  = False  # set True by Flask /bin/collected endpoint
+state_lock        = threading.Lock()
+pir_count         = 0
+deposit_count     = 0      # incremented each time the lid opens
+lid_open          = False  # True when IR detects lid is open
+collected_flag    = False  # set True by Flask /bin/collected endpoint
+last_material     = "---"  # most recent classification label (shown on LCD)
+last_confidence   = 0.0    # confidence of last classification
+_inference_lock   = threading.Lock()  # prevent overlapping classify_deposit calls
+_lcd_lock         = threading.Lock()  # serialise I2C LCD writes across threads
+
+# Last known sensor readings — used by interrupt callbacks for immediate LCD update
+_last_fill_pct  = 0.0
+_last_bin_temp  = None
+_last_bin_hum   = None
 
 # Colours for SenseHat LED matrix
 GREEN = (0, 200, 0)
@@ -188,16 +306,41 @@ def update_led_matrix(fill_pct: float):
     sense.clear(colour)
 
 
-def update_lcd(fill_pct: float):
-    """Write fill % and status to 16×2 LCD."""
-    line1 = f"Fill: {fill_pct:5.1f}%"
-    line2 = "ALERT-COLLECT" if fill_pct >= config.FILL_ALERT_THRESHOLD else "OK"
-    _lcd_command(0x01)
-    time.sleep(0.01)
-    _lcd_set_cursor(0, 0)
-    _lcd_write(line1)
-    _lcd_set_cursor(1, 0)
-    _lcd_write(line2)
+def update_lcd(fill_pct: float, bin_temp, bin_humidity):
+    """Cache latest sensor readings and refresh the LCD display."""
+    global _last_fill_pct, _last_bin_temp, _last_bin_hum
+    with state_lock:
+        _last_fill_pct = fill_pct
+        _last_bin_temp = bin_temp
+        _last_bin_hum  = bin_humidity
+    _refresh_lcd()
+
+
+def _refresh_lcd():
+    """Render current state to the LCD. Safe to call from any thread."""
+    with state_lock:
+        is_open      = lid_open
+        material     = last_material
+        fill_pct     = _last_fill_pct
+        bin_temp     = _last_bin_temp
+        bin_humidity = _last_bin_hum
+
+    if is_open:
+        line1 = "Item:           "
+        line2 = (material or "Detecting...")[:16].ljust(16)
+    else:
+        t_str = f"{bin_temp:.1f}C" if bin_temp is not None else "---C"
+        h_str = f"{bin_humidity:.0f}%" if bin_humidity is not None else "---%"
+        line1 = f"Fill:{fill_pct:4.0f}% {t_str}"[:16].ljust(16)
+        line2 = f"Hum: {h_str}"[:16].ljust(16)
+
+    with _lcd_lock:
+        _lcd_command(0x01)
+        time.sleep(0.01)
+        _lcd_set_cursor(0, 0)
+        _lcd_write(line1)
+        _lcd_set_cursor(1, 0)
+        _lcd_write(line2)
 
 
 def capture_image() -> str:
@@ -217,22 +360,91 @@ def capture_image() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def pir_callback(channel):
+    """PIR fires when someone waves their hand — turn on LED (motor open signal)."""
     global pir_count
     with state_lock:
         pir_count += 1
-    log.debug("PIR triggered → count=%d", pir_count)
+    GPIO.output(config.PIN_LED, GPIO.HIGH)
+    log.info("PIR: motion detected → LED on (count=%d)", pir_count)
 
 
 def ir_callback(channel):
-    global ir_count
+    """Fires on both edges of the IR sensor to track lid state."""
+    pin_state = GPIO.input(config.PIN_IR)
+    if pin_state == GPIO.HIGH:
+        _on_lid_open()
+    else:
+        _on_lid_close()
+
+
+def _on_lid_open():
+    """Called when IR goes HIGH (active-low: HIGH = lid open)."""
+    global deposit_count, last_material
     with state_lock:
-        ir_count += 1
-    log.info("IR deposit detected → count=%d, capturing image…", ir_count)
-    threading.Thread(target=capture_image, daemon=True).start()
+        deposit_count += 1
+        last_material = "Detecting..."
+        lid_state_val = deposit_count
+    log.info("Lid OPENED → deposit #%d — starting classification", lid_state_val)
+    _refresh_lcd()
+    threading.Thread(target=_handle_lid_open, daemon=True).start()
 
 
-GPIO.add_event_detect(config.PIN_PIR, GPIO.RISING,  callback=pir_callback, bouncetime=500)
-GPIO.add_event_detect(config.PIN_IR,  GPIO.FALLING, callback=ir_callback,  bouncetime=1000)
+def _on_lid_close():
+    """Called when IR goes LOW (active-low: LOW = lid closed)."""
+    global lid_open
+    with state_lock:
+        lid_open = False
+    GPIO.output(config.PIN_LED, GPIO.LOW)
+    log.info("Lid CLOSED → LED off")
+    _refresh_lcd()
+
+
+def _handle_lid_open():
+    """Capture image and run TFLite classification while lid is open (daemon thread)."""
+    global last_material, last_confidence, lid_open
+
+    # Mark lid as open only inside this thread to avoid race with ir_callback
+    with state_lock:
+        lid_open = True
+
+    capture_image()  # save still for Flask dashboard
+
+    if not _inference_available:
+        with state_lock:
+            last_material = "unknown"
+        return
+
+    if not _inference_lock.acquire(blocking=False):
+        log.debug("Inference already running — skipping this deposit")
+        return
+
+    try:
+        label, confidence = _classify_deposit()
+        if label is None:
+            log.warning("Inference: no frames captured")
+            with state_lock:
+                last_material = "unknown"
+            return
+
+        log.info("Inference: %s  (%.0f%%)", label, confidence * 100)
+
+        with state_lock:
+            last_material   = label
+            last_confidence = confidence
+        _refresh_lcd()  # show result on LCD immediately
+
+        if confidence >= config.CONFIDENCE_THRESHOLD and _local_mqtt and _local_mqtt_connected:
+            _local_mqtt.publish(config.MQTT_TOPIC_MATERIAL,   label)
+            _local_mqtt.publish(config.MQTT_TOPIC_CONFIDENCE, f"{confidence:.2f}")
+            log.info("Local MQTT: published material=%s confidence=%.2f", label, confidence)
+        elif confidence < config.CONFIDENCE_THRESHOLD:
+            log.info("Inference: below threshold (%.0f%%) — not published", config.CONFIDENCE_THRESHOLD * 100)
+    finally:
+        _inference_lock.release()
+
+
+GPIO.add_event_detect(config.PIN_PIR, GPIO.RISING, callback=pir_callback, bouncetime=500)
+GPIO.add_event_detect(config.PIN_IR,  GPIO.BOTH,   callback=ir_callback,  bouncetime=200)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,13 +562,13 @@ def load_state() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    global pir_count, ir_count, collected_flag, mqtt_client
+    global pir_count, deposit_count, collected_flag, mqtt_client
 
     # Restore counters across restarts
     saved = load_state()
     with state_lock:
-        pir_count = saved.get("pir_count", 0)
-        ir_count  = saved.get("ir_count",  0)
+        pir_count     = saved.get("pir_count",     0)
+        deposit_count = saved.get("deposit_count", 0)
 
     mqtt_client = init_mqtt()
     time.sleep(2)  # allow MQTT connection to establish
@@ -384,25 +596,29 @@ def main():
                 pass
 
             with state_lock:
-                snap_pir = pir_count
-                snap_ir  = ir_count
+                snap_pir     = pir_count
+                snap_deposit = deposit_count
+                snap_lid     = lid_open
                 was_collected = collected_flag or file_collected
                 if was_collected:
                     # Reset fill representation: pretend bin is empty
                     fill_pct       = 0.0
                     pir_count      = 0
-                    ir_count       = 0
+                    deposit_count  = 0
                     snap_pir       = 0
-                    snap_ir        = 0
+                    snap_deposit   = 0
                     collected_flag = False
                     log.info("Bin marked as collected — counters reset.")
 
             # ── Actuators ────────────────────────────────────────────────────
             update_led_matrix(fill_pct)
-            update_lcd(fill_pct)
+            update_lcd(fill_pct, bin_temp, bin_hum)
 
             # ── Persist state for Flask ───────────────────────────────────────
             now_str = datetime.utcnow().isoformat() + "Z"
+            with state_lock:
+                snap_material    = last_material
+                snap_confidence  = last_confidence
             current_state = {
                 "timestamp":        now_str,
                 "fill_pct":         fill_pct,
@@ -413,8 +629,11 @@ def main():
                 "office_humidity":  office["office_humidity"],
                 "office_pressure":  office["office_pressure"],
                 "pir_count":        snap_pir,
-                "ir_count":         snap_ir,
+                "deposit_count":    snap_deposit,
+                "lid_open":         snap_lid,
                 "alert":            fill_pct >= config.FILL_ALERT_THRESHOLD,
+                "last_material":    snap_material,
+                "last_confidence":  snap_confidence,
             }
             save_state(current_state)
 
@@ -426,8 +645,8 @@ def main():
                 4: office["office_temp"],
                 5: office["office_humidity"],
                 6: snap_pir,
-                7: snap_ir,
-                # Field 8 (urgency) is written by the scheduled MATLAB Analysis
+                7: 1 if snap_lid else 0,
+                8: snap_deposit,
             }
 
             # ── Publish: MQTT primary, HTTP fallback ──────────────────────────
@@ -445,9 +664,10 @@ def main():
             sleep_time = max(0, interval - elapsed)
             log.info(
                 "fill=%.1f%% dist=%.1fcm bin_T=%s°C office_T=%.1f°C "
-                "PIR=%d IR=%d  next_in=%.0fs",
+                "PIR=%d deposits=%d lid=%s  next_in=%.0fs",
                 fill_pct, distance_cm, bin_temp,
-                office["office_temp"], snap_pir, snap_ir, sleep_time,
+                office["office_temp"], snap_pir, snap_deposit,
+                "open" if snap_lid else "closed", sleep_time,
             )
             time.sleep(sleep_time)
 
@@ -457,8 +677,12 @@ def main():
         if mqtt_client:
             mqtt_client.loop_stop()
             mqtt_client.disconnect()
+        if _local_mqtt:
+            _local_mqtt.loop_stop()
+            _local_mqtt.disconnect()
         camera.stop()
         dht_sensor.exit()
+        GPIO.output(config.PIN_LED, GPIO.LOW)
         _lcd_command(0x01)
         sense.clear()
         GPIO.cleanup()
