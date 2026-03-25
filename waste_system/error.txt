@@ -1,0 +1,31 @@
+group28@mypi:~/Documents/IOTProject/IOTProject $ /usr/bin/python /home/group28/Documents/IOTProject/IOTProject/waste_system/app.py
+[app] sensor_node.py started (pid=6642)
+ * Serving Flask app 'app'
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://10.238.120.243:5000
+Press CTRL+C to quit
+[0:45:05.783429334] [6642]  INFO Camera camera_manager.cpp:330 libcamera v0.5.2+99-bfd68f78
+[0:45:05.866837824] [6666]  INFO IPAProxy ipa_proxy.cpp:180 Using tuning file /usr/share/libcamera/ipa/rpi/vc4/imx219.json
+[0:45:05.881111174] [6666]  INFO Camera camera_manager.cpp:220 Adding camera '/base/soc/i2c0mux/i2c@1/imx219@10' for pipeline handler rpi/vc4
+[0:45:05.881185231] [6666]  INFO RPI vc4.cpp:440 Registered camera /base/soc/i2c0mux/i2c@1/imx219@10 to Unicam device /dev/media0 and ISP device /dev/media2
+[0:45:05.881229806] [6666]  INFO RPI pipeline_base.cpp:1107 Using configuration file '/usr/share/libcamera/pipeline/rpi/vc4/rpi_apps.yaml'
+2026-03-25 11:18:12,878 [INFO] Initialization successful.
+2026-03-25 11:18:12,879 [INFO] Camera now open.
+2026-03-25 11:18:12,888 [INFO] Camera configuration has been adjusted!
+[0:45:05.902987033] [6642]  INFO Camera camera.cpp:1215 configuring streams: (0) 640x480-RGB888/SMPTE170M/Rec709/None/Full (1) 640x480-SBGGR10_CSI2P/RAW
+[0:45:05.904660516] [6666]  INFO RPI vc4.cpp:615 Sensor: /base/soc/i2c0mux/i2c@1/imx219@10 - Selected sensor format: 640x480-SBGGR10_1X10/RAW - Selected unicam format: 640x480-pBAA/RAW
+2026-03-25 11:18:12,894 [INFO] Configuration successful!
+2026-03-25 11:18:13,001 [INFO] Camera started
+2026-03-25 11:18:15,003 [INFO] Camera initialised successfully.
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+2026-03-25 11:18:15,275 [INFO] TFLite model loaded — classes: ['cardboard', 'glass', 'metal', 'paper', 'plastic', 'trash']
+Traceback (most recent call last):
+  File "/home/group28/Documents/IOTProject/IOTProject/waste_system/sensor_node.py", line 417, in <module>
+    GPIO.add_event_detect(config.PIN_PIR, GPIO.RISING, callback=pir_callback, bouncetime=500)
+RuntimeError: Failed to add edge detection
+2026-03-25 11:18:15,295 [INFO] Camera stopped
+2026-03-25 11:18:15,499 [INFO] Camera closed successfully.
+Lost access to message queue
