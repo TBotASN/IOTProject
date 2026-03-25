@@ -1,24 +1,136 @@
 #!/usr/bin/env python3
 """
-app.py — Smart Office Waste Management System — Flask Dashboard
+app.py — Smart Office Waste Management System — Flask Dashboard (Local Mode)
 Runs concurrently with sensor_node.py on port 5000.
 
 Routes:
   GET  /             — colour-coded dashboard (Jinja2 template)
-  GET  /api/status   — JSON snapshot of current sensor state
+  GET  /api/status   — JSON snapshot of current sensor state (polled every 3s)
   POST /bin/collected — mark bin as collected (resets fill state)
 """
 
 import json
 import os
-import time
+import sys
+import subprocess
+import atexit
+import threading
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, redirect, url_for
 
 import config
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Camera inference globals
+# ─────────────────────────────────────────────────────────────────────────────
+
+_cam_lock        = threading.Lock()
+_cam_material    = "---"
+_cam_confidence  = 0.0
+
+
+def _camera_thread():
+    """Background thread: runs Picamera2 + TFLite inference continuously."""
+    global _cam_material, _cam_confidence
+    try:
+        import cv2
+        import numpy as np
+        from picamera2 import Picamera2
+    except ImportError as e:
+        print(f"[camera] Missing dependency: {e} — material detection disabled")
+        return
+
+    # Load TFLite model (optional — falls back to no inference)
+    interp = inp_d = outp_d = class_names = None
+    try:
+        try:
+            import tflite_runtime.interpreter as tflite
+        except ImportError:
+            import tensorflow.lite as tflite  # type: ignore
+        with open(config.LABELS_PATH) as f:
+            class_names = [line.strip() for line in f]
+        interp = tflite.Interpreter(model_path=config.TFLITE_PATH)
+        interp.allocate_tensors()
+        inp_d  = interp.get_input_details()
+        outp_d = interp.get_output_details()
+        print(f"[camera] TFLite model loaded — classes: {class_names}")
+    except FileNotFoundError:
+        print(f"[camera] Model not found at {config.TFLITE_PATH} — running without inference")
+    except Exception as exc:
+        print(f"[camera] TFLite load failed ({exc}) — running without inference")
+
+    try:
+        cam = Picamera2()
+        cfg = cam.create_video_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+        )
+        cam.configure(cfg)
+        cam.start()
+        import time as _time
+        _time.sleep(1)
+        print("[camera] Camera started (640×480 RGB)")
+    except Exception as exc:
+        print(f"[camera] Camera failed to open: {exc}")
+        return
+
+    import time as _time
+    try:
+        while True:
+            frame = cam.capture_array()   # RGB888 numpy array
+
+            if interp is not None:
+                img = cv2.resize(frame, (config.IMG_SIZE, config.IMG_SIZE))
+                arr = np.expand_dims(img.astype(np.float32) / 255.0, axis=0)
+                interp.set_tensor(inp_d[0]['index'], arr)
+                interp.invoke()
+                scores = interp.get_tensor(outp_d[0]['index'])[0]
+                idx    = int(np.argmax(scores))
+                conf   = float(scores[idx])
+                label  = class_names[idx] if conf >= config.CONFIDENCE_THRESHOLD else "uncertain"
+                with _cam_lock:
+                    _cam_material   = label
+                    _cam_confidence = conf
+
+            _time.sleep(0.1)   # ~10 fps inference rate
+
+    except Exception as exc:
+        print(f"[camera] Thread error: {exc}")
+    finally:
+        cam.stop()
+        cam.close()
+
 app = Flask(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Launch sensor_node.py as a background subprocess
+# ─────────────────────────────────────────────────────────────────────────────
+
+_sensor_proc = None
+
+def _start_sensor_node():
+    global _sensor_proc
+    sensor_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sensor_node.py")
+    _sensor_proc = subprocess.Popen(
+        [sys.executable, sensor_script],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    print(f"[app] sensor_node.py started (pid={_sensor_proc.pid})")
+
+def _stop_sensor_node():
+    if _sensor_proc and _sensor_proc.poll() is None:
+        _sensor_proc.terminate()
+        try:
+            _sensor_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _sensor_proc.kill()
+        print("[app] sensor_node.py stopped.")
+
+atexit.register(_stop_sensor_node)
+_start_sensor_node()
+
+_cam_thread = threading.Thread(target=_camera_thread, daemon=True)
+_cam_thread.start()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  State helpers
@@ -32,7 +144,6 @@ def _read_state() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
 
-    # Provide safe defaults so templates never crash on missing keys
     defaults = {
         "timestamp":       "—",
         "fill_pct":        0.0,
@@ -43,8 +154,12 @@ def _read_state() -> dict:
         "office_humidity": None,
         "office_pressure": None,
         "pir_count":       0,
-        "ir_count":        0,
+        "deposit_count":   0,
+        "lid_open":        False,
+        "led_state":       False,
         "alert":           False,
+        "last_material":   "---",
+        "last_confidence": 0.0,
     }
     defaults.update(state)
     return defaults
@@ -68,21 +183,12 @@ def _signal_collected():
 
 
 def _fill_colour(fill_pct: float) -> str:
-    """Return a Bootstrap / CSS colour name for a given fill percentage."""
+    """Return a Bootstrap colour name for a given fill percentage."""
     if fill_pct >= 80:
-        return "danger"   # red
+        return "danger"
     if fill_pct >= 50:
-        return "warning"  # amber
-    return "success"      # green
-
-
-def _thingspeak_chart_url(field: int, title: str) -> str:
-    """Return the ThingSpeak chart iframe src URL for a given field."""
-    return (
-        f"https://thingspeak.com/channels/{config.THINGSPEAK_CHANNEL_ID}"
-        f"/charts/{field}?bgcolor=%23ffffff&color=%23d62020"
-        f"&dynamic=true&results=40&title={title}&type=line"
-    )
+        return "warning"
+    return "success"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,35 +197,15 @@ def _thingspeak_chart_url(field: int, title: str) -> str:
 
 @app.route("/")
 def dashboard():
-    state      = _read_state()
-    fill_pct   = float(state["fill_pct"])
+    state       = _read_state()
+    fill_pct    = float(state["fill_pct"])
     fill_colour = _fill_colour(fill_pct)
-
-    # Latest deposit image (relative path for url_for / static serving)
-    image_filename = "images/latest_deposit.jpg"
-    image_abs      = os.path.join(app.static_folder, image_filename)
-    has_image      = os.path.isfile(image_abs)
-
-    charts = [
-        {"src": _thingspeak_chart_url(1, "Fill+%25"),          "title": "Fill Level (%)"},
-        {"src": _thingspeak_chart_url(2, "Bin+Temp"),          "title": "Bin Temperature (°C)"},
-        {"src": _thingspeak_chart_url(3, "Bin+Humidity"),      "title": "Bin Humidity (%)"},
-        {"src": _thingspeak_chart_url(4, "Office+Temp"),       "title": "Office Temperature (°C)"},
-        {"src": _thingspeak_chart_url(5, "Office+Humidity"),   "title": "Office Humidity (%)"},
-        {"src": _thingspeak_chart_url(6, "PIR+Count"),         "title": "PIR Approach Count"},
-        {"src": _thingspeak_chart_url(7, "IR+Deposits"),       "title": "IR Deposit Count"},
-        {"src": _thingspeak_chart_url(8, "Urgency+Score"),     "title": "Urgency Score (MATLAB)"},
-    ]
 
     return render_template(
         "dashboard.html",
         state        = state,
         fill_pct     = fill_pct,
         fill_colour  = fill_colour,
-        has_image    = has_image,
-        image_url    = url_for("static", filename=image_filename) if has_image else None,
-        charts       = charts,
-        channel_id   = config.THINGSPEAK_CHANNEL_ID,
         alert_thr    = config.FILL_ALERT_THRESHOLD,
         now          = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     )
@@ -127,9 +213,12 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
-    """JSON endpoint — current sensor state for live polling / external tools."""
+    """JSON endpoint — current sensor state, polled every 3 s by the dashboard."""
     state = _read_state()
     state["fill_colour"] = _fill_colour(float(state["fill_pct"]))
+    with _cam_lock:
+        state["last_material"]   = _cam_material
+        state["last_confidence"] = _cam_confidence
     return jsonify(state)
 
 

@@ -6,10 +6,11 @@ Run this script to verify each sensor is wired correctly and returning valid dat
 Each test can be run independently from the menu.
 
 Hardware (BCM pin numbering):
-  HC-SR04   TRIG→GPIO23 (Pin 16), ECHO→GPIO24 (Pin 18) via voltage divider 5V→3.3V
-  PIR        GPIO17 (Pin 11)
-  IR prox    GPIO22 (Pin 15)
+  HC-SR04    TRIG→GPIO23 (Pin 16), ECHO→GPIO24 (Pin 18) via voltage divider 5V→3.3V
+  IR wave    GPIO17 (Pin 11)  — hand-wave sensor (replaces PIR)
+  IR prox    GPIO22 (Pin 15)  — lid open/closed detection (active-low)
   DHT22      GPIO4  (Pin 7)
+  LED        GPIO27 (Pin 13)  — motor indicator
   SenseHAT   Jumper cables — see pin table below (I2C, SPI, power, EEPROM)
   LCD 16×2   I2C SDA GPIO2 (Pin 3), SCL GPIO3 (Pin 5), 1602I2C at 0x3e
   Camera     CSI ribbon connector (not GPIO)
@@ -20,11 +21,12 @@ import sys
 import os
 
 # ── Pin constants (mirrors config.py) ─────────────────────────────────────────
-PIN_TRIG = 23
-PIN_ECHO = 24
-PIN_PIR  = 17
-PIN_IR   = 22
-PIN_DHT  = 4
+PIN_TRIG    = 23
+PIN_ECHO    = 24
+PIN_WAVE_IR = 17   # IR wave sensor — hand-wave to open lid
+PIN_IR      = 22   # IR proximity — lid open/closed (active-low)
+PIN_DHT     = 4
+PIN_LED     = 27   # Motor indicator LED
 BIN_DEPTH_CM = 30
 
 # ── TFLite paths (mirrors config.py) ──────────────────────────────────────────
@@ -49,13 +51,13 @@ PIN_TABLE = """
 ── Pi 40-pin GPIO Header (physical pin layout) ──────────────────────────────
   Label                    Pin        Pin   Label
   ──────────────────────────────────────────────────────────────────────────
-  3.3V  (SenseHAT pwr)  ● [ 1]──[ 2] ●   5V   (SenseHAT / PIR / IR / LCD)
+  3.3V  (SenseHAT pwr)  ● [ 1]──[ 2] ●   5V   (SenseHAT / IR / LCD)
   SDA   (I2C: LCD+HAT)  ● [ 3]──[ 4] ●   5V
   SCL   (I2C: LCD+HAT)  ● [ 5]──[ 6] ●   GND  (SenseHAT)
   DHT22 DATA            ● [ 7]──[ 8] ·
   GND                   · [ 9]──[10] ·
-  PIR OUT               ● [11]──[12] ·
-  —                     · [13]──[14] ·   GND
+  IR WAVE OUT           ● [11]──[12] ·
+  LED (motor ind.)      ● [13]──[14] ·   GND
   IR DOUT               ● [15]──[16] ●   HC-SR04 TRIG
   3.3V                  · [17]──[18] ●   HC-SR04 ECHO  ← 5V→3.3V divider
   SenseHAT MOSI         ● [19]──[20] ·   GND
@@ -79,9 +81,11 @@ PIN_TABLE = """
 ║ HC-SR04 ECHO     ║  Pin 18       ║  GPIO24    ║ Input  — NEEDS voltage divider!      ║
 ║                  ║               ║            ║ (5V→3.3V: 1kΩ + 2kΩ resistors)      ║
 ╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
-║ PIR motion       ║  Pin 11       ║  GPIO17    ║ Input, RISING edge trigger           ║
+║ IR wave sensor   ║  Pin 11       ║  GPIO17    ║ Input, RISING = hand wave detected   ║
 ╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
-║ IR proximity     ║  Pin 15       ║  GPIO22    ║ Input, active-low (0=detected)       ║
+║ IR proximity     ║  Pin 15       ║  GPIO22    ║ Input, active-low (0=lid closed)     ║
+╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
+║ LED indicator    ║  Pin 13       ║  GPIO27    ║ Output — on when lid should open     ║
 ╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
 ║ DHT22            ║  Pin 7        ║  GPIO4     ║ 1-wire data (adafruit-circuitpython) ║
 ╠══════════════════╬═══════════════╬════════════╬══════════════════════════════════════╣
@@ -203,38 +207,71 @@ def test_ultrasonic():
         err(f"Unexpected error: {exc}")
 
 
-def test_pir():
-    """PIR motion sensor — BCM GPIO17 (Pin 11)."""
-    section("PIR Motion Sensor  [GPIO17 / Pin 11]")
+def test_wave_ir():
+    """IR wave sensor — BCM GPIO17 (Pin 11). Detects hand wave to open lid."""
+    section("IR Wave Sensor  [GPIO17 / Pin 11]")
     print("  Wiring: VCC→5V (Pin2), GND→GND (Pin6), OUT→GPIO17 (Pin11)")
+    print("  HIGH = hand detected, LOW = no hand")
     print("  Listening for 15 seconds — wave your hand in front of the sensor...\n")
     try:
         import RPi.GPIO as GPIO
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
-        GPIO.setup(PIN_PIR, GPIO.IN)
+        GPIO.setup(PIN_WAVE_IR, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
         count = 0
         deadline = time.time() + 15
         last_state = None
 
         while time.time() < deadline:
-            state = GPIO.input(PIN_PIR)
+            state = GPIO.input(PIN_WAVE_IR)
             if state != last_state:
                 if state == GPIO.HIGH:
                     count += 1
-                    print(f"  [OK]  Motion detected! (event #{count})")
+                    print(f"  [OK]  Hand detected! (event #{count})")
                 else:
-                    print(f"  [--]  No motion")
+                    print(f"  [--]  No hand")
                 last_state = state
-            time.sleep(0.5)
+            time.sleep(0.1)
 
-        GPIO.cleanup([PIN_PIR])
+        GPIO.cleanup([PIN_WAVE_IR])
 
         if count == 0:
-            warn("No motion detected. Check wiring or sensor sensitivity adjustment.")
+            warn("No detections. Check wiring or adjust sensitivity potentiometer on sensor.")
         else:
-            ok(f"Total events detected: {count}")
+            ok(f"Total wave events: {count}")
+    except ImportError:
+        err("RPi.GPIO not installed. Run: pip install RPi.GPIO")
+    except Exception as exc:
+        err(f"Unexpected error: {exc}")
+
+
+def test_led():
+    """Motor indicator LED — BCM GPIO27 (Pin 13)."""
+    section("Motor Indicator LED  [GPIO27 / Pin 13]")
+    print("  Wiring: Anode→GPIO27 (Pin13) via resistor, Cathode→GND")
+    print("  LED will blink 3 times then stay on for 2 s, then off.\n")
+    try:
+        import RPi.GPIO as GPIO
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        GPIO.setup(PIN_LED, GPIO.OUT, initial=GPIO.LOW)
+
+        print("  Blinking 3 times...")
+        for i in range(3):
+            GPIO.output(PIN_LED, GPIO.HIGH)
+            print(f"    ON  (blink {i+1})")
+            time.sleep(0.4)
+            GPIO.output(PIN_LED, GPIO.LOW)
+            print(f"    OFF")
+            time.sleep(0.4)
+
+        print("  Holding ON for 2 seconds...")
+        GPIO.output(PIN_LED, GPIO.HIGH)
+        time.sleep(2)
+        GPIO.output(PIN_LED, GPIO.LOW)
+        GPIO.cleanup([PIN_LED])
+        ok("LED test complete. Confirm you saw 3 blinks + 2 s solid.")
     except ImportError:
         err("RPi.GPIO not installed. Run: pip install RPi.GPIO")
     except Exception as exc:
@@ -498,6 +535,7 @@ def test_camera():
     print("  Make sure camera is enabled: sudo raspi-config → Interface Options → Camera\n")
 
     output_path = "/tmp/test_capture.jpg"
+    cam = None
     try:
         from picamera2 import Picamera2
         cam = Picamera2()
@@ -517,6 +555,9 @@ def test_camera():
         err("picamera2 not installed. Run: pip install picamera2")
     except Exception as exc:
         err(f"Camera error: {exc}")
+    finally:
+        if cam is not None:
+            cam.close()
 
 
 def test_camera_live():
@@ -633,6 +674,7 @@ def test_camera_live():
         print("\n  [Ctrl+C — stopping]")
     finally:
         cam.stop()
+        cam.close()
         if has_display:
             cv2.destroyAllWindows()
 
@@ -651,9 +693,10 @@ def test_all():
 
     tests = [
         ("HC-SR04 Ultrasonic",   test_ultrasonic),
-        ("PIR Motion Sensor",    test_pir),
+        ("IR Wave Sensor",       test_wave_ir),
         ("IR Proximity Sensor",  test_ir),
         ("DHT22 Temp/Humidity",  test_dht22),
+        ("LED Indicator",        test_led),
         ("SenseHAT",             test_sensehat),
         ("SenseHAT LEDs",        test_sensehat_leds),
         ("I2C LCD Display",      test_lcd),
@@ -686,9 +729,10 @@ MENU = """
 ╠══════════════════════════════════════════════════════════╣
 ║  0.  Show GPIO pin reference table                       ║
 ║  1.  Test HC-SR04 Ultrasonic  (GPIO23/24)                ║
-║  2.  Test PIR Motion Sensor   (GPIO17)                   ║
+║  2.  Test IR Wave Sensor      (GPIO17)                   ║
 ║  3.  Test IR Proximity Sensor (GPIO22)                   ║
 ║  4.  Test DHT22 Temp/Humidity (GPIO4)                    ║
+║  W.  Test LED Indicator       (GPIO27)                   ║
 ║  5.  Test SenseHAT            (jumper cables)            ║
 ║  S.  Test SenseHAT LEDs only  (8×8 matrix)               ║
 ║  6.  Test I2C LCD Display     (GPIO2/3, addr 0x3e)       ║
@@ -700,17 +744,19 @@ MENU = """
 """
 
 ACTIONS = {
-    "0": ("Show pin reference table",              lambda: print(PIN_TABLE)),
-    "1": ("HC-SR04 Ultrasonic",                    test_ultrasonic),
-    "2": ("PIR Motion Sensor",                     test_pir),
-    "3": ("IR Proximity Sensor",                   test_ir),
-    "4": ("DHT22 Temp/Humidity",                   test_dht22),
-    "5": ("SenseHAT",                              test_sensehat),
-    "s": ("SenseHAT LEDs only",                    test_sensehat_leds),
-    "S": ("SenseHAT LEDs only",                    test_sensehat_leds),
-    "6": ("I2C LCD Display",                       test_lcd),
-    "7": ("Camera (still capture)",                test_camera),
-    "8": ("Run ALL sensors",                       test_all),
+    "0": ("Show pin reference table",               lambda: print(PIN_TABLE)),
+    "1": ("HC-SR04 Ultrasonic",                     test_ultrasonic),
+    "2": ("IR Wave Sensor",                          test_wave_ir),
+    "3": ("IR Proximity Sensor",                     test_ir),
+    "4": ("DHT22 Temp/Humidity",                     test_dht22),
+    "w": ("LED Indicator",                           test_led),
+    "W": ("LED Indicator",                           test_led),
+    "5": ("SenseHAT",                               test_sensehat),
+    "s": ("SenseHAT LEDs only",                     test_sensehat_leds),
+    "S": ("SenseHAT LEDs only",                     test_sensehat_leds),
+    "6": ("I2C LCD Display",                        test_lcd),
+    "7": ("Camera (still capture)",                 test_camera),
+    "8": ("Run ALL sensors",                        test_all),
     "l": ("Live camera + TFLite (real-time video)", test_camera_live),
     "L": ("Live camera + TFLite (real-time video)", test_camera_live),
 }
@@ -724,7 +770,7 @@ def main():
     while True:
         print(MENU)
         try:
-            choice = input("Enter option (0-9, S, L): ").strip()
+            choice = input("Enter option (0-9, W, S, L): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             break

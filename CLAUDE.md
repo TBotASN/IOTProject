@@ -25,7 +25,7 @@ Dashboard available at `http://10.113.171.243:5000` (or `http://127.0.0.1:5000`)
 |-------------------------|-----------|--------------------------------------------|
 | HC-SR04 TRIG            | GPIO23    | Ultrasonic — bin fill level                |
 | HC-SR04 ECHO            | GPIO24    | Via 5V→3.3V voltage divider (1kΩ + 2kΩ)  |
-| PIR motion sensor       | GPIO17    | Hand-wave → LED on, simulates lid open     |
+| IR wave sensor          | GPIO17    | Hand-wave → LED on (replaces PIR)          |
 | IR proximity sensor     | GPIO22    | Active-low: HIGH=lid open, LOW=lid closed  |
 | DHT22 temperature/hum   | GPIO4     | Inside bin — bin environment               |
 | LED (motor indicator)   | GPIO27    | On when lid should open                    |

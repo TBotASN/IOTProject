@@ -5,10 +5,10 @@ Raspberry Pi 4B sensor loop — writes state to /tmp/waste_state.json for Flask.
 
 Hardware (BCM pin numbering):
   HC-SR04   TRIG→GPIO23, ECHO→GPIO24 (via voltage divider)
-  PIR        GPIO17  (hand-wave → LED on, simulates motor open)
+  IR wave    GPIO17  (hand-wave → servo open, replaces PIR)
   IR prox    GPIO22  (active-low: LOW=lid closed, HIGH=lid open)
   DHT22      GPIO4   (inside bin — temperature + humidity)
-  LED        GPIO27  (motor actuation indicator)
+  LED        GPIO27  (motor indicator — on when lid should be open)
   SenseHat   GPIO header (office ambient)
   LCD 16×2   I2C (SDA/SCL) — env display when closed, object when open
   Camera     CSI ribbon (classifies thrown object when lid open)
@@ -21,6 +21,8 @@ import os
 import sys
 import logging
 from datetime import datetime
+import urllib.request
+import urllib.parse
 import RPi.GPIO as GPIO
 import adafruit_dht
 import board
@@ -44,11 +46,11 @@ log = logging.getLogger(__name__)
 GPIO.cleanup()
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
-GPIO.setup(config.PIN_TRIG, GPIO.OUT, initial=GPIO.LOW)
-GPIO.setup(config.PIN_ECHO, GPIO.IN)
-GPIO.setup(config.PIN_PIR,  GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(config.PIN_IR,   GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(config.PIN_LED,  GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(config.PIN_TRIG,    GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(config.PIN_ECHO,    GPIO.IN)
+GPIO.setup(config.PIN_WAVE_IR, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(config.PIN_IR,      GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(config.PIN_LED,     GPIO.OUT, initial=GPIO.LOW)
 
 # ── Sensor objects ────────────────────────────────────────────────────────────
 dht_sensor = adafruit_dht.DHT22(board.D4)  # GPIO4
@@ -98,7 +100,7 @@ state_lock      = threading.Lock()
 pir_count       = 0
 deposit_count   = 0      # incremented each time the lid opens
 lid_open        = False  # True when IR detects lid is open
-led_state       = False  # True when LED is on (motor actuation)
+led_state       = False  # True when servo is in open position
 collected_flag  = False  # set True by Flask /bin/collected endpoint
 last_material   = "---"  # most recent deposit label (shown on LCD)
 last_confidence = 0.0
@@ -113,6 +115,40 @@ _last_bin_hum   = None
 GREEN = (0, 200, 0)
 RED   = (200, 0, 0)
 OFF   = (0, 0, 0)
+
+# ThingSpeak throttle — free tier allows 1 update per 15 s
+_THINGSPEAK_INTERVAL = 15
+_last_thingspeak_send = 0.0
+
+
+def publish_to_thingspeak(state: dict):
+    """Send sensor fields to ThingSpeak via HTTP GET. Throttled to 1/15 s."""
+    global _last_thingspeak_send
+    now = time.time()
+    if now - _last_thingspeak_send < _THINGSPEAK_INTERVAL:
+        return
+    params = urllib.parse.urlencode({
+        "api_key":  config.THINGSPEAK_WRITE_KEY,
+        "field1":   state.get("fill_pct",        0),
+        "field2":   state.get("bin_temp",         0) or 0,
+        "field3":   state.get("bin_humidity",     0) or 0,
+        "field4":   state.get("office_temp",      0) or 0,
+        "field5":   state.get("office_humidity",  0) or 0,
+        "field6":   state.get("pir_count",        0),
+        "field7":   1 if state.get("lid_open") else 0,
+        "field8":   state.get("deposit_count",    0),
+    })
+    url = f"https://{config.THINGSPEAK_HTTP_HOST}{config.THINGSPEAK_HTTP_PATH}?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            entry_id = resp.read().decode().strip()
+            if entry_id == "0":
+                log.warning("ThingSpeak: update rejected (rate limit or bad key)")
+            else:
+                log.info("ThingSpeak: published entry_id=%s  fill=%.1f%%", entry_id, state.get("fill_pct", 0))
+        _last_thingspeak_send = now
+    except Exception as exc:
+        log.warning("ThingSpeak publish failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,14 +262,14 @@ def _refresh_lcd():
 #  GPIO interrupt callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
-def pir_callback(channel):
-    """PIR fires when someone waves their hand — turn on LED (motor open signal)."""
+def wave_callback(channel):
+    """IR wave sensor detects hand wave — turn on LED (motor indicator)."""
     global pir_count, led_state
     with state_lock:
         pir_count += 1
         led_state = True
     GPIO.output(config.PIN_LED, GPIO.HIGH)
-    log.info("PIR: motion detected → LED on (count=%d)", pir_count)
+    log.info("IR wave: hand detected → LED on (count=%d)", pir_count)
 
 
 def ir_callback(channel):
@@ -268,18 +304,18 @@ def _on_lid_close():
 
 
 def _poll_interrupt_pins():
-    """Poll PIR and IR pins in a thread — same approach as test_sensors.py."""
-    pir_last = GPIO.input(config.PIN_PIR)
-    ir_last  = GPIO.input(config.PIN_IR)
+    """Poll IR wave and IR lid sensors in a thread — polling avoids GPIO edge-detect issues."""
+    wave_last = GPIO.input(config.PIN_WAVE_IR)
+    ir_last   = GPIO.input(config.PIN_IR)
     while True:
-        pir_now = GPIO.input(config.PIN_PIR)
-        ir_now  = GPIO.input(config.PIN_IR)
-        # PIR: trigger on RISING (LOW → HIGH)
-        if pir_now != pir_last:
-            if pir_now == GPIO.HIGH:
-                pir_callback(config.PIN_PIR)
-            pir_last = pir_now
-        # IR: trigger on any change (BOTH edges)
+        wave_now = GPIO.input(config.PIN_WAVE_IR)
+        ir_now   = GPIO.input(config.PIN_IR)
+        # IR wave sensor: trigger on RISING (LOW → HIGH = hand detected)
+        if wave_now != wave_last:
+            if wave_now == GPIO.HIGH:
+                wave_callback(config.PIN_WAVE_IR)
+            wave_last = wave_now
+        # IR lid sensor: trigger on any change (BOTH edges)
         if ir_now != ir_last:
             ir_callback(config.PIN_IR)
             ir_last = ir_now
@@ -390,16 +426,17 @@ def main():
                     "last_confidence": snap_confidence,
                 }
                 save_state(current_state)
+                publish_to_thingspeak(current_state)
 
                 elapsed    = time.time() - loop_start
                 sleep_time = max(0, LOOP_INTERVAL - elapsed)
                 log.info(
-                    "fill=%.1f%% dist=%.1fcm bin_T=%s°C office_T=%.1f°C "
-                    "PIR=%d deposits=%d lid=%s led=%s  next_in=%.1fs",
+                    "fill=%.1f%% dist=%.1fcm bin_T=%s°C sensehat_T=%.1f°C "
+                    "waves=%d deposits=%d lid=%s servo=%s  next_in=%.1fs",
                     fill_pct, distance_cm, bin_temp,
                     office["office_temp"], snap_pir, snap_deposit,
                     "open" if snap_lid else "closed",
-                    "on"   if snap_led  else "off",
+                    "open" if snap_led  else "closed",
                     sleep_time,
                 )
                 time.sleep(sleep_time)

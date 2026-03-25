@@ -5,130 +5,110 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Smart Waste Management Dashboard</title>
 
-  <!-- Bootstrap 5 (CDN) -->
+  <!-- Bootstrap 5 -->
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
     rel="stylesheet"
     integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
     crossorigin="anonymous"
   />
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 
   <style>
     body { background: #f0f2f5; }
-
     .card { border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
 
     /* Fill bar */
-    .fill-bar-wrap {
-      background: #e9ecef;
-      border-radius: 8px;
-      overflow: hidden;
-      height: 36px;
-    }
+    .fill-bar-wrap  { background: #e9ecef; border-radius: 8px; overflow: hidden; height: 36px; }
     .fill-bar-inner {
-      height: 100%;
-      line-height: 36px;
-      font-weight: 600;
-      color: #fff;
-      text-shadow: 0 1px 2px rgba(0,0,0,.4);
-      transition: width 0.8s ease;
-      min-width: 2rem;
-      text-align: right;
-      padding-right: 8px;
+      height: 100%; line-height: 36px; font-weight: 600; color: #fff;
+      text-shadow: 0 1px 2px rgba(0,0,0,.4); transition: width 0.8s ease;
+      min-width: 2rem; text-align: right; padding-right: 8px;
     }
 
     /* Alert banner */
-    .alert-banner {
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: .6; }
-    }
+    .alert-banner { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 
-    /* Sensor cards */
+    /* Sensor value display */
     .reading-label { font-size: .75rem; text-transform: uppercase; color: #6c757d; }
     .reading-value { font-size: 1.6rem; font-weight: 700; }
     .reading-unit  { font-size: .85rem; color: #6c757d; }
 
-    /* ThingSpeak iframes */
-    .ts-chart { width: 100%; height: 260px; border: none; border-radius: 8px; }
+    /* Status badges */
+    .status-badge {
+      display: inline-block; padding: .35em .75em;
+      border-radius: 20px; font-size: .85rem; font-weight: 600;
+    }
 
-    /* Deposit image */
-    .deposit-img { width: 100%; border-radius: 8px; max-height: 320px; object-fit: cover; }
-
-    /* Collected button */
     .btn-collect { font-size: 1.1rem; padding: .65rem 2rem; }
+
+    /* Timestamp */
+    #last-updated { font-size: .75rem; color: #6c757d; }
   </style>
 </head>
 <body>
 
-<!-- ── Navbar ────────────────────────────────────────────────────────────── -->
+<!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <nav class="navbar navbar-dark bg-dark">
   <div class="container-fluid">
-    <span class="navbar-brand fw-bold">
-      &#9851; Smart Office Waste Management
-    </span>
-    <span class="text-secondary small">{{ now }}</span>
+    <span class="navbar-brand fw-bold">&#9851; Smart Office Waste Management</span>
+    <div class="d-flex align-items-center gap-3">
+      <span id="last-updated" class="text-secondary small">{{ now }}</span>
+      <span id="lid-badge" class="status-badge {% if state.lid_open %}bg-danger text-white{% else %}bg-success text-white{% endif %}">
+        LID: {% if state.lid_open %}OPEN{% else %}CLOSED{% endif %}
+      </span>
+      <span id="led-badge" class="status-badge {% if state.led_state %}bg-warning text-dark{% else %}bg-secondary text-white{% endif %}">
+        MOTOR: {% if state.led_state %}ON{% else %}OFF{% endif %}
+      </span>
+    </div>
   </div>
 </nav>
 
 <div class="container-fluid py-4 px-4">
 
-  <!-- ── Alert banner ───────────────────────────────────────────────────── -->
+  <!-- ── Alert banner ──────────────────────────────────────────────────────── -->
   {% if state.alert %}
   <div class="alert alert-danger alert-banner fw-bold fs-5 text-center mb-4" role="alert">
     &#9888; BIN FULL — COLLECTION REQUIRED ({{ fill_pct }}% capacity)
   </div>
   {% endif %}
 
-  <!-- ── Row 1: Fill + Collect button ─────────────────────────────────── -->
+  <!-- ── Row 1: Fill level + Collect button ─────────────────────────────── -->
   <div class="row g-3 mb-3">
 
-    <!-- Fill level card -->
     <div class="col-12 col-lg-8">
       <div class="card p-4 h-100">
         <h5 class="card-title mb-3">Bin Fill Level</h5>
-
         <div class="fill-bar-wrap mb-2">
-          <div
-            class="fill-bar-inner bg-{{ fill_colour }}"
-            style="width: {{ [fill_pct, 100] | min }}%"
-          >
+          <div id="fill-bar" class="fill-bar-inner bg-{{ fill_colour }}" style="width: {{ [fill_pct, 100] | min }}%">
             {{ fill_pct }}%
           </div>
         </div>
-
         <div class="d-flex justify-content-between text-muted small mb-3">
           <span>0%</span>
           <span class="text-warning">50%</span>
           <span class="text-danger">{{ alert_thr }}% (Alert)</span>
           <span>100%</span>
         </div>
-
         <p class="mb-0 text-muted small">
-          Measured distance: <strong>{{ state.distance_cm }} cm</strong>
+          Distance: <strong id="distance-val">{{ state.distance_cm }} cm</strong>
           &nbsp;|&nbsp;
-          Last updated: <strong>{{ state.timestamp }}</strong>
+          Updated: <strong id="timestamp-val">{{ state.timestamp }}</strong>
         </p>
       </div>
     </div>
 
-    <!-- Collect action card -->
     <div class="col-12 col-lg-4">
       <div class="card p-4 h-100 d-flex flex-column justify-content-between">
         <div>
           <h5 class="card-title">Collection Action</h5>
-          <p class="text-muted small">
-            Press the button below after emptying the bin. This resets the fill
-            level and usage counters.
-          </p>
+          <p class="text-muted small">Press after emptying the bin to reset fill level and counters.</p>
         </div>
         <form method="POST" action="/bin/collected">
-          <button
-            type="submit"
-            class="btn btn-{% if state.alert %}danger{% else %}outline-secondary{% endif %} btn-collect w-100"
-          >
+          <button type="submit"
+            class="btn btn-{% if state.alert %}danger{% else %}outline-secondary{% endif %} btn-collect w-100">
             &#10003; Mark as Collected
           </button>
         </form>
@@ -140,21 +120,21 @@
   <!-- ── Row 2: Sensor readings ─────────────────────────────────────────── -->
   <div class="row g-3 mb-3">
 
-    <!-- Bin micro-environment (DHT22) -->
+    <!-- Bin environment (DHT22) -->
     <div class="col-12 col-md-6 col-xl-3">
       <div class="card p-3 h-100">
         <h6 class="card-title text-muted mb-3">&#127759; Bin Environment (DHT22)</h6>
         <div class="row text-center g-2">
           <div class="col-6">
             <div class="reading-label">Temperature</div>
-            <div class="reading-value text-danger">
+            <div id="bin-temp" class="reading-value text-danger">
               {% if state.bin_temp is not none %}{{ state.bin_temp }}{% else %}—{% endif %}
             </div>
             <div class="reading-unit">°C</div>
           </div>
           <div class="col-6">
             <div class="reading-label">Humidity</div>
-            <div class="reading-value text-primary">
+            <div id="bin-hum" class="reading-value text-primary">
               {% if state.bin_humidity is not none %}{{ state.bin_humidity }}{% else %}—{% endif %}
             </div>
             <div class="reading-unit">%RH</div>
@@ -170,21 +150,21 @@
         <div class="row text-center g-2">
           <div class="col-4">
             <div class="reading-label">Temp</div>
-            <div class="reading-value text-danger">
+            <div id="office-temp" class="reading-value text-danger">
               {% if state.office_temp is not none %}{{ state.office_temp }}{% else %}—{% endif %}
             </div>
             <div class="reading-unit">°C</div>
           </div>
           <div class="col-4">
             <div class="reading-label">Humidity</div>
-            <div class="reading-value text-primary">
+            <div id="office-hum" class="reading-value text-primary">
               {% if state.office_humidity is not none %}{{ state.office_humidity }}{% else %}—{% endif %}
             </div>
             <div class="reading-unit">%RH</div>
           </div>
           <div class="col-4">
             <div class="reading-label">Pressure</div>
-            <div class="reading-value text-success" style="font-size:1.1rem">
+            <div id="office-pres" class="reading-value text-success" style="font-size:1.1rem">
               {% if state.office_pressure is not none %}{{ state.office_pressure }}{% else %}—{% endif %}
             </div>
             <div class="reading-unit">hPa</div>
@@ -200,110 +180,245 @@
         <div class="row text-center g-2">
           <div class="col-6">
             <div class="reading-label">Approaches (PIR)</div>
-            <div class="reading-value text-warning">{{ state.pir_count }}</div>
+            <div id="pir-count" class="reading-value text-warning">{{ state.pir_count }}</div>
             <div class="reading-unit">events</div>
           </div>
           <div class="col-6">
             <div class="reading-label">Deposits (IR)</div>
-            <div class="reading-value text-info">{{ state.ir_count }}</div>
+            <div id="deposit-count" class="reading-value text-info">{{ state.deposit_count }}</div>
             <div class="reading-unit">events</div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Latest deposit image -->
+    <!-- Material detection (Camera + TFLite) -->
     <div class="col-12 col-md-6 col-xl-3">
-      <div class="card p-3 h-100">
-        <h6 class="card-title text-muted mb-3">&#128247; Latest Deposit Image</h6>
-        {% if has_image %}
-          <img src="{{ image_url }}" alt="Latest deposit" class="deposit-img" />
-        {% else %}
-          <div class="text-center text-muted py-4">
-            <div style="font-size:3rem">&#128247;</div>
-            <div class="small">No deposit image yet</div>
-          </div>
-        {% endif %}
+      <div class="card p-3 h-100 text-center d-flex flex-column justify-content-center">
+        <h6 class="card-title text-muted mb-3">&#127381; Last Detected Material</h6>
+        <div id="material-label" class="reading-value" style="font-size:1.8rem;">
+          {{ state.last_material }}
+        </div>
+        <div id="material-conf" class="reading-unit mt-1">
+          {% if state.last_confidence > 0 %}{{ "%.0f"|format(state.last_confidence * 100) }}% confidence{% endif %}
+        </div>
       </div>
     </div>
 
   </div><!-- /row 2 -->
 
-  <!-- ── Row 3: ThingSpeak charts ───────────────────────────────────────── -->
-  <div class="row g-3">
+  <!-- ── Row 3: Sensor health ───────────────────────────────────────────── -->
+  <div class="row g-3 mb-3">
     <div class="col-12">
-      <div class="card p-4">
-        <h5 class="card-title mb-3">
-          Historical Data
-          <small class="text-muted fw-normal fs-6">
-            — ThingSpeak Channel&nbsp;
-            <a
-              href="https://thingspeak.com/channels/{{ channel_id }}"
-              target="_blank"
-              rel="noopener"
-            >{{ channel_id }}</a>
-          </small>
-        </h5>
-        <div class="row g-3">
-          {% for chart in charts %}
-          <div class="col-12 col-sm-6 col-xl-3">
-            <p class="mb-1 small fw-semibold text-muted">{{ chart.title }}</p>
-            <iframe
-              src="{{ chart.src }}"
-              class="ts-chart"
-              title="{{ chart.title }}"
-              loading="lazy"
-            ></iframe>
-          </div>
-          {% endfor %}
+      <div class="card p-3">
+        <h6 class="card-title text-muted mb-3">&#128300; Sensor Status</h6>
+        <div class="d-flex flex-wrap gap-2" id="sensor-health">
+          <span id="health-ultrasonic" class="status-badge bg-success text-white">&#10003; Ultrasonic</span>
+          <span id="health-dht22" class="status-badge bg-success text-white">&#10003; DHT22</span>
+          <span id="health-sensehat" class="status-badge bg-success text-white">&#10003; SenseHat</span>
+          <span id="health-ir" class="status-badge bg-success text-white">&#10003; IR Sensor</span>
+          <span id="health-pir" class="status-badge bg-success text-white">&#10003; PIR</span>
+        </div>
+        <hr class="my-3"/>
+        <div class="text-muted small">
+          <div>Alert threshold: <strong>{{ alert_thr }}%</strong></div>
+          <div>State file: <strong>/tmp/waste_state.json</strong></div>
         </div>
       </div>
     </div>
   </div><!-- /row 3 -->
 
+  <!-- ── Row 4: Live charts ──────────────────────────────────────────────── -->
+  <div class="row g-3">
+    <div class="col-12 col-md-6">
+      <div class="card p-3">
+        <h6 class="card-title text-muted mb-2">&#128202; Fill Level History</h6>
+        <canvas id="fill-chart" height="120"></canvas>
+      </div>
+    </div>
+    <div class="col-12 col-md-6">
+      <div class="card p-3">
+        <h6 class="card-title text-muted mb-2">&#127777; Bin Temperature History</h6>
+        <canvas id="temp-chart" height="120"></canvas>
+      </div>
+    </div>
+  </div><!-- /row 4 -->
+
 </div><!-- /container -->
 
-<!-- ── Bootstrap JS ───────────────────────────────────────────────────────── -->
-<script
-  src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
   integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmFRB4GFJq7fJVt7VoHJ7BoIYGO"
-  crossorigin="anonymous"
-></script>
+  crossorigin="anonymous"></script>
 
-<!-- ── Live-update polling via /api/status ───────────────────────────────── -->
 <script>
 (function () {
-  const POLL_INTERVAL_MS = 15000;  // poll every 15 s
+  const POLL_MS   = 3000;
+  const MAX_PTS   = 30;
+  const fillData  = [];
+  const tempData  = [];
+  const labels    = [];
 
-  function pct(value, max) {
-    return Math.min(100, Math.max(0, value));
+  // ── Chart.js setup ────────────────────────────────────────────────────────
+  const chartDefaults = {
+    type: "line",
+    options: {
+      animation: false,
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+        y: { ticks: { font: { size: 10 } } },
+      },
+    },
+  };
+
+  const fillChart = new Chart(document.getElementById("fill-chart"), {
+    ...chartDefaults,
+    data: {
+      labels,
+      datasets: [{
+        data: fillData,
+        borderColor: "#0d6efd",
+        backgroundColor: "rgba(13,110,253,.1)",
+        fill: true,
+        tension: 0.3,
+        pointRadius: 2,
+      }],
+    },
+    options: {
+      ...chartDefaults.options,
+      scales: {
+        ...chartDefaults.options.scales,
+        y: { min: 0, max: 100, ticks: { font: { size: 10 } } },
+      },
+    },
+  });
+
+  const tempChart = new Chart(document.getElementById("temp-chart"), {
+    ...chartDefaults,
+    data: {
+      labels,
+      datasets: [{
+        data: tempData,
+        borderColor: "#dc3545",
+        backgroundColor: "rgba(220,53,69,.1)",
+        fill: true,
+        tension: 0.3,
+        pointRadius: 2,
+      }],
+    },
+  });
+
+  function pushPoint(ts, fill, temp) {
+    const t = ts ? ts.substring(11, 19) : "";
+    labels.push(t);
+    fillData.push(fill);
+    tempData.push(temp !== null ? temp : NaN);
+    if (labels.length > MAX_PTS) {
+      labels.shift(); fillData.shift(); tempData.shift();
+    }
+    fillChart.update();
+    tempChart.update();
   }
 
+  // ── Helper: update a text element ─────────────────────────────────────────
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  }
+
+  function setHtml(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = val;
+  }
+
+  // ── Fill bar ──────────────────────────────────────────────────────────────
   function colourClass(fill) {
     if (fill >= 80) return "bg-danger";
     if (fill >= 50) return "bg-warning";
     return "bg-success";
   }
 
+  function updateFillBar(fill) {
+    const bar = document.getElementById("fill-bar");
+    if (!bar) return;
+    bar.style.width = Math.min(100, Math.max(0, fill)) + "%";
+    bar.textContent = fill.toFixed(1) + "%";
+    bar.className   = "fill-bar-inner " + colourClass(fill);
+  }
+
+  // ── Lid / LED badges ──────────────────────────────────────────────────────
+  function updateBadge(id, isActive, onText, offText, activeClass, inactiveClass) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = isActive ? onText : offText;
+    el.className   = "status-badge " + (isActive ? activeClass : inactiveClass);
+  }
+
+  // ── Sensor health ─────────────────────────────────────────────────────────
+  function updateHealth(data) {
+    const ok  = "status-badge bg-success text-white";
+    const err = "status-badge bg-danger text-white";
+
+    const ultra = data.distance_cm !== undefined && data.distance_cm >= 0;
+    const dht   = data.bin_temp !== null && data.bin_temp !== undefined;
+    const sense = data.office_temp !== null && data.office_temp !== undefined;
+    const ir    = data.lid_open !== undefined;   // always present in state
+    const pir   = data.pir_count !== undefined;
+
+    setClass("health-ultrasonic", ultra ? ok : err);
+    setClass("health-dht22",      dht   ? ok : err);
+    setClass("health-sensehat",   sense ? ok : err);
+    setClass("health-ir",         ir    ? ok : err);
+    setClass("health-pir",        pir   ? ok : err);
+
+    function setClass(id, cls) {
+      const el = document.getElementById(id);
+      if (el) el.className = cls;
+    }
+  }
+
+  // ── Main poll loop ─────────────────────────────────────────────────────────
+  let prevAlert = {{ 'true' if state.alert else 'false' }};
+
   async function refresh() {
     try {
-      const resp  = await fetch("/api/status");
+      const resp = await fetch("/api/status");
       if (!resp.ok) return;
-      const data  = await resp.json();
-      const fill  = parseFloat(data.fill_pct) || 0;
+      const d = await resp.json();
 
-      // Fill bar
-      const bar = document.querySelector(".fill-bar-inner");
-      if (bar) {
-        bar.style.width   = pct(fill) + "%";
-        bar.textContent   = fill.toFixed(1) + "%";
-        bar.className     = "fill-bar-inner " + colourClass(fill);
-      }
+      const fill = parseFloat(d.fill_pct) || 0;
+      updateFillBar(fill);
 
-      // Alert banner — simple page reload when alert state changes to avoid
-      // partial DOM surgery; the flash is acceptable at 15 s intervals.
-      const hasAlertBanner = !!document.querySelector(".alert-banner");
-      if (data.alert !== hasAlertBanner) {
+      setText("distance-val",   (d.distance_cm !== undefined ? d.distance_cm : "—") + " cm");
+      setText("timestamp-val",  d.timestamp || "—");
+      setText("last-updated",   new Date().toLocaleTimeString());
+
+      setText("bin-temp",  d.bin_temp  !== null && d.bin_temp  !== undefined ? d.bin_temp  : "—");
+      setText("bin-hum",   d.bin_humidity !== null && d.bin_humidity !== undefined ? d.bin_humidity : "—");
+      setText("office-temp", d.office_temp  !== null && d.office_temp  !== undefined ? d.office_temp  : "—");
+      setText("office-hum",  d.office_humidity !== null && d.office_humidity !== undefined ? d.office_humidity : "—");
+      setText("office-pres", d.office_pressure !== null && d.office_pressure !== undefined ? d.office_pressure : "—");
+
+      setText("pir-count",     d.pir_count     !== undefined ? d.pir_count     : 0);
+      setText("deposit-count", d.deposit_count !== undefined ? d.deposit_count : 0);
+
+      setText("material-label", d.last_material || "---");
+      setText("material-conf",  d.last_confidence > 0 ? Math.round(d.last_confidence * 100) + "% confidence" : "");
+
+      // Lid + LED badges
+      updateBadge("lid-badge", d.lid_open,  "LID: OPEN", "LID: CLOSED", "bg-danger text-white", "bg-success text-white");
+      updateBadge("led-badge", d.led_state, "MOTOR: ON", "MOTOR: OFF",  "bg-warning text-dark",  "bg-secondary text-white");
+
+      // Sensor health
+      updateHealth(d);
+
+      // Charts
+      pushPoint(d.timestamp, fill, d.bin_temp !== undefined ? d.bin_temp : null);
+
+      // Full reload only if alert state flips
+      if (d.alert !== prevAlert) {
+        prevAlert = d.alert;
         window.location.reload();
       }
 
@@ -312,7 +427,10 @@
     }
   }
 
-  setInterval(refresh, POLL_INTERVAL_MS);
+  // Seed with first data point immediately
+  pushPoint("{{ state.timestamp }}", {{ fill_pct }}, {{ state.bin_temp if state.bin_temp is not none else 'null' }});
+
+  setInterval(refresh, POLL_MS);
 })();
 </script>
 
