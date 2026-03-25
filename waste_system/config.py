@@ -18,7 +18,7 @@ THINGSPEAK_HTTP_HOST = "api.thingspeak.com"
 THINGSPEAK_HTTP_PATH = "/update"
 
 # ── Hardware constants ────────────────────────────────────────────────────────
-BIN_DEPTH_CM = 30          # physical depth of the bin in centimetres
+BIN_DEPTH_CM = 27          # physical depth of the bin in centimetres
 FILL_ALERT_THRESHOLD  = 80 # % — LED turns red, LCD shows ALERT-COLLECT
 FILL_FAST_SAMPLE_THR  = 70 # % — adaptive sampling kicks in
 SAMPLE_INTERVAL_NORMAL = 60 # seconds
