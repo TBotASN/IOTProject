@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template, redirect, url_for
 
 import config
+import predictor
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Logging
@@ -271,6 +272,7 @@ def api_status():
     with _cam_lock:
         state["last_material"]   = _cam_material
         state["last_confidence"] = _cam_confidence
+    state["prediction"] = predictor.get_prediction()
     return jsonify(state)
 
 
