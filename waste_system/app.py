@@ -4,30 +4,50 @@ app.py — Smart Office Waste Management System — Flask Dashboard (Local Mode)
 Runs concurrently with sensor_node.py on port 5000.
 
 Routes:
-  GET  /             — colour-coded dashboard (Jinja2 template)
-  GET  /api/status   — JSON snapshot of current sensor state (polled every 3s)
+  GET  /              — colour-coded dashboard (Jinja2 template)
+  GET  /api/status    — JSON snapshot of current sensor state (polled every 3s)
+  GET  /api/health    — liveness check: sensor node alive, app uptime, PID
   POST /bin/collected — mark bin as collected (resets fill state)
 """
 
 import json
+import logging
 import os
 import sys
 import subprocess
 import atexit
 import threading
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, redirect, url_for
 
 import config
+import predictor
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("/tmp/waste_app.log"),
+    ],
+)
+log = logging.getLogger(__name__)
+
+_app_start_time = time.time()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Camera inference globals
 # ─────────────────────────────────────────────────────────────────────────────
 
-_cam_lock        = threading.Lock()
-_cam_material    = "---"
-_cam_confidence  = 0.0
+_cam_lock       = threading.Lock()
+_cam_material   = "---"
+_cam_confidence = 0.0
 
 
 def _camera_thread():
@@ -38,7 +58,7 @@ def _camera_thread():
         import numpy as np
         from picamera2 import Picamera2
     except ImportError as e:
-        print(f"[camera] Missing dependency: {e} — material detection disabled")
+        log.info("[camera] Missing dependency: %s — material detection disabled", e)
         return
 
     # Load TFLite model (optional — falls back to no inference)
@@ -54,11 +74,11 @@ def _camera_thread():
         interp.allocate_tensors()
         inp_d  = interp.get_input_details()
         outp_d = interp.get_output_details()
-        print(f"[camera] TFLite model loaded — classes: {class_names}")
+        log.info("[camera] TFLite model loaded — classes: %s", class_names)
     except FileNotFoundError:
-        print(f"[camera] Model not found at {config.TFLITE_PATH} — running without inference")
+        log.info("[camera] Model not found at %s — running without inference", config.TFLITE_PATH)
     except Exception as exc:
-        print(f"[camera] TFLite load failed ({exc}) — running without inference")
+        log.warning("[camera] TFLite load failed (%s) — running without inference", exc)
 
     try:
         cam = Picamera2()
@@ -67,14 +87,12 @@ def _camera_thread():
         )
         cam.configure(cfg)
         cam.start()
-        import time as _time
-        _time.sleep(1)
-        print("[camera] Camera started (640×480 RGB)")
+        time.sleep(1)
+        log.info("[camera] Camera started (640×480 RGB)")
     except Exception as exc:
-        print(f"[camera] Camera failed to open: {exc}")
+        log.warning("[camera] Camera failed to open: %s", exc)
         return
 
-    import time as _time
     try:
         while True:
             frame = cam.capture_array()   # RGB888 numpy array
@@ -92,45 +110,77 @@ def _camera_thread():
                     _cam_material   = label
                     _cam_confidence = conf
 
-            _time.sleep(0.1)   # ~10 fps inference rate
+            time.sleep(0.1)   # ~10 fps inference rate
 
     except Exception as exc:
-        print(f"[camera] Thread error: {exc}")
+        log.error("[camera] Thread error: %s", exc)
     finally:
         cam.stop()
         cam.close()
 
+
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Launch sensor_node.py as a background subprocess
+#  Launch sensor_node.py as a background subprocess + watchdog
 # ─────────────────────────────────────────────────────────────────────────────
 
-_sensor_proc = None
+_sensor_proc      = None
+_sensor_proc_lock = threading.Lock()
+
 
 def _start_sensor_node():
+    """(Re)start sensor_node.py as a subprocess. Thread-safe."""
     global _sensor_proc
     sensor_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sensor_node.py")
-    _sensor_proc = subprocess.Popen(
-        [sys.executable, sensor_script],
-        cwd=os.path.dirname(os.path.abspath(__file__)),
-    )
-    print(f"[app] sensor_node.py started (pid={_sensor_proc.pid})")
+    with _sensor_proc_lock:
+        _sensor_proc = subprocess.Popen(
+            [sys.executable, sensor_script],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+    log.info("[app] sensor_node.py started (pid=%d)", _sensor_proc.pid)
+
 
 def _stop_sensor_node():
-    if _sensor_proc and _sensor_proc.poll() is None:
-        _sensor_proc.terminate()
+    """Gracefully stop sensor_node.py (called on app exit)."""
+    with _sensor_proc_lock:
+        proc = _sensor_proc
+    if proc and proc.poll() is None:
+        proc.terminate()
         try:
-            _sensor_proc.wait(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            _sensor_proc.kill()
-        print("[app] sensor_node.py stopped.")
+            proc.kill()
+        log.info("[app] sensor_node.py stopped.")
+
+
+def _sensor_watchdog():
+    """Background thread: restart sensor_node.py if it dies unexpectedly."""
+    while True:
+        time.sleep(10)
+        with _sensor_proc_lock:
+            proc = _sensor_proc
+        if proc and proc.poll() is not None:
+            exit_code = proc.returncode
+            log.warning("[watchdog] sensor_node.py exited (code=%d) — restarting…", exit_code)
+            _start_sensor_node()
+
 
 atexit.register(_stop_sensor_node)
 _start_sensor_node()
 
-_cam_thread = threading.Thread(target=_camera_thread, daemon=True)
+_watchdog_thread = threading.Thread(target=_sensor_watchdog, daemon=True, name="sensor-watchdog")
+_watchdog_thread.start()
+
+_cam_thread = threading.Thread(target=_camera_thread, daemon=True, name="camera-inference")
 _cam_thread.start()
+
+log.info(
+    "[app] Flask dashboard starting on port %d | state_file=%s",
+    config.FLASK_PORT, config.STATE_FILE,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  State helpers
@@ -146,6 +196,9 @@ def _read_state() -> dict:
 
     defaults = {
         "timestamp":       "—",
+        "started_at":      "—",
+        "uptime_seconds":  0,
+        "loop_count":      0,
         "fill_pct":        0.0,
         "distance_cm":     config.BIN_DEPTH_CM,
         "bin_temp":        None,
@@ -219,13 +272,31 @@ def api_status():
     with _cam_lock:
         state["last_material"]   = _cam_material
         state["last_confidence"] = _cam_confidence
+    state["prediction"] = predictor.get_prediction()
     return jsonify(state)
+
+
+@app.route("/api/health")
+def api_health():
+    """Liveness endpoint — reports whether sensor_node is running and app uptime."""
+    with _sensor_proc_lock:
+        proc = _sensor_proc
+    alive    = bool(proc and proc.poll() is None)
+    pid      = proc.pid if proc else None
+    uptime   = round(time.time() - _app_start_time)
+    return jsonify({
+        "sensor_node_alive": alive,
+        "sensor_node_pid":   pid,
+        "app_uptime_seconds": uptime,
+        "timestamp":          datetime.now(timezone.utc).isoformat(),
+    })
 
 
 @app.route("/bin/collected", methods=["POST"])
 def bin_collected():
     """Mark the bin as collected — signals sensor_node.py to reset fill state."""
     _signal_collected()
+    log.info("[app] Bin marked as collected via dashboard.")
     return redirect(url_for("dashboard"))
 
 
@@ -234,4 +305,9 @@ def bin_collected():
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=config.FLASK_PORT, debug=config.FLASK_DEBUG)
+    app.run(
+        host="0.0.0.0",
+        port=config.FLASK_PORT,
+        debug=config.FLASK_DEBUG,
+        threaded=True,
+    )
