@@ -106,6 +106,11 @@ last_material   = "---"  # most recent deposit label (shown on LCD)
 last_confidence = 0.0
 _lcd_lock       = threading.Lock()  # serialise I2C LCD writes across threads
 
+# ── Node uptime tracking ───────────────────────────────────────────────────────
+_node_start_time = time.time()
+_started_at      = datetime.utcnow().isoformat() + "Z"
+_loop_count      = 0
+
 # Last known sensor readings — used by interrupt callbacks for immediate LCD update
 _last_fill_pct  = 0.0
 _last_bin_temp  = None
@@ -139,6 +144,9 @@ def publish_to_thingspeak(state: dict):
         "field8":   state.get("deposit_count",    0),
     })
     url = f"https://{config.THINGSPEAK_HTTP_HOST}{config.THINGSPEAK_HTTP_PATH}?{params}"
+    # Mark send time before the request — prevents hammering on slow connections.
+    # Reset to 0 in except so the next interval will retry.
+    _last_thingspeak_send = now
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             entry_id = resp.read().decode().strip()
@@ -146,9 +154,9 @@ def publish_to_thingspeak(state: dict):
                 log.warning("ThingSpeak: update rejected (rate limit or bad key)")
             else:
                 log.info("ThingSpeak: published entry_id=%s  fill=%.1f%%", entry_id, state.get("fill_pct", 0))
-        _last_thingspeak_send = now
     except Exception as exc:
         log.warning("ThingSpeak publish failed: %s", exc)
+        _last_thingspeak_send = 0.0  # allow retry after next interval
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,7 +361,7 @@ def load_state() -> dict:
 LOOP_INTERVAL = 2  # seconds between sensor reads / state updates
 
 def main():
-    global pir_count, deposit_count, collected_flag
+    global pir_count, deposit_count, collected_flag, _loop_count
 
     # Restore counters across restarts
     saved = load_state()
@@ -408,8 +416,12 @@ def main():
                     snap_material   = last_material
                     snap_confidence = last_confidence
 
+                _loop_count += 1
                 current_state = {
                     "timestamp":       now_str,
+                    "started_at":      _started_at,
+                    "uptime_seconds":  round(time.time() - _node_start_time),
+                    "loop_count":      _loop_count,
                     "fill_pct":        fill_pct,
                     "distance_cm":     distance_cm,
                     "bin_temp":        bin_temp,
