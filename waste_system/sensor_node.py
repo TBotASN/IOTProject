@@ -30,6 +30,7 @@ from sense_hat import SenseHat
 import smbus
 
 import config
+import predictor
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -405,6 +406,11 @@ def main():
                         snap_deposit   = 0
                         collected_flag = False
                         log.info("Bin marked as collected — counters reset.")
+                        predictor.clear_history()
+
+                # Record fill level for prediction (every 5 loops ≈ every 10 s)
+                if _loop_count % 5 == 0:
+                    predictor.record_fill(fill_pct)
 
                 # ── Actuators ────────────────────────────────────────────────────
                 update_led_matrix(fill_pct)

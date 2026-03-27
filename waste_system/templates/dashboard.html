@@ -24,6 +24,7 @@
       --accent-office:  #198754;
       --accent-usage:   #fd7e14;
       --accent-material:#6610f2;
+      --accent-predict: #0891b2;
       --card-radius:    14px;
       --card-shadow:    0 2px 12px rgba(0,0,0,.08);
     }
@@ -65,6 +66,11 @@
     .card-accent-office   { border-left-color: var(--accent-office); }
     .card-accent-usage    { border-left-color: var(--accent-usage); }
     .card-accent-material { border-left-color: var(--accent-material); }
+    .card-accent-predict  { border-left-color: var(--accent-predict); }
+    .predict-badge {
+      display: inline-block; padding: .25em .65em;
+      border-radius: 12px; font-size: .75rem; font-weight: 700;
+    }
 
     /* ── Alert banner ── */
     .alert-banner {
@@ -333,10 +339,41 @@
 
   </div><!-- /row 2 -->
 
-  <!-- ── Row 3: Sensor health + node status ─────────────────────────────────── -->
+  <!-- ── Row 3: Prediction + Sensor health ─────────────────────────────────── -->
   <div class="row g-3 mb-3">
-    <div class="col-12">
-      <div class="card p-3">
+
+    <!-- Prediction card -->
+    <div class="col-12 col-md-5">
+      <div class="card p-3 h-100 card-accent card-accent-predict">
+        <h6 class="card-title text-muted mb-3 d-flex align-items-center gap-2">
+          <i class="bi bi-clock-history" style="color:var(--accent-predict)"></i> Fill Prediction
+        </h6>
+        <div class="row text-center g-2">
+          <div class="col-4">
+            <div class="reading-label">Fill Rate</div>
+            <div id="pred-rate" class="reading-value" style="color:var(--accent-predict);font-size:clamp(1.1rem,2.5vw,1.5rem)">—</div>
+            <div class="reading-unit">%/hr</div>
+          </div>
+          <div class="col-4">
+            <div class="reading-label">Time to Alert</div>
+            <div id="pred-hours" class="reading-value" style="color:var(--accent-predict);font-size:clamp(1.1rem,2.5vw,1.5rem)">—</div>
+            <div class="reading-unit">hours</div>
+          </div>
+          <div class="col-4">
+            <div class="reading-label">Predicted At</div>
+            <div id="pred-at" class="reading-unit mt-1" style="font-size:.75rem;min-height:2em">—</div>
+          </div>
+        </div>
+        <div class="mt-2 text-center">
+          <span id="pred-confidence" class="predict-badge bg-secondary text-white">low confidence</span>
+          <span id="pred-points"     class="meta-text ms-2">0 pts</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sensor status card -->
+    <div class="col-12 col-md-7">
+      <div class="card p-3 h-100">
         <div class="row align-items-center g-2">
           <div class="col-12 col-lg-8">
             <h6 class="card-title text-muted mb-2 d-flex align-items-center gap-2">
@@ -358,6 +395,7 @@
         </div>
       </div>
     </div>
+
   </div><!-- /row 3 -->
 
   <!-- ── Row 4: Charts ──────────────────────────────────────────────────────── -->
@@ -658,6 +696,24 @@
       }
       if (d.loop_count !== undefined) {
         setText('heartbeat-display', 'Loop count: ' + d.loop_count);
+      }
+
+      // Prediction
+      if (d.prediction) {
+        const p = d.prediction;
+        setText('pred-rate',   p.fill_rate_per_hour != null ? p.fill_rate_per_hour.toFixed(1) : '—');
+        setText('pred-hours',  p.hours_until_full   != null ? p.hours_until_full.toFixed(1)   : '—');
+        setText('pred-at',     p.predicted_full_at  || '—');
+        setText('pred-points', (p.history_points ?? 0) + ' pts');
+        const confEl = document.getElementById('pred-confidence');
+        if (confEl) {
+          const conf = p.confidence || 'low';
+          confEl.textContent = conf + ' confidence';
+          confEl.className = 'predict-badge text-white ' + (
+            conf === 'high'   ? 'bg-success' :
+            conf === 'medium' ? 'bg-warning text-dark' : 'bg-secondary'
+          );
+        }
       }
 
       // Charts
