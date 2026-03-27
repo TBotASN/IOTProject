@@ -292,12 +292,14 @@ def ir_callback(channel):
 
 def _on_lid_open():
     """Called when IR goes HIGH (active-low: HIGH = lid open)."""
-    global deposit_count, lid_open
+    global deposit_count, lid_open, led_state
     with state_lock:
         deposit_count += 1
         lid_open      = True
+        led_state     = True
         lid_state_val = deposit_count
-    log.info("Lid OPENED → deposit #%d", lid_state_val)
+    GPIO.output(config.PIN_LED, GPIO.HIGH)
+    log.info("Lid OPENED → LED on, deposit #%d", lid_state_val)
     _refresh_lcd()
 
 
@@ -377,8 +379,14 @@ def main():
             loop_start = time.time()
             try:
                 # ── Read sensors ─────────────────────────────────────────────────
-                distance_cm = read_ultrasonic()
-                fill_pct    = compute_fill(distance_cm)
+                # PIN_IR active-low: LOW = lid closed, HIGH = lid open
+                if GPIO.input(config.PIN_IR) == GPIO.LOW:
+                    distance_cm = read_ultrasonic()
+                    fill_pct    = compute_fill(distance_cm)
+                else:
+                    distance_cm = None
+                    with state_lock:
+                        fill_pct = _last_fill_pct
 
                 bin_temp, bin_hum = read_dht22()
                 office = read_sensehat()
@@ -429,7 +437,7 @@ def main():
                     "uptime_seconds":  round(time.time() - _node_start_time),
                     "loop_count":      _loop_count,
                     "fill_pct":        fill_pct,
-                    "distance_cm":     distance_cm,
+                    "distance_cm":     distance_cm if distance_cm is not None else -1,
                     "bin_temp":        bin_temp,
                     "bin_humidity":    bin_hum,
                     "office_temp":     office["office_temp"],
